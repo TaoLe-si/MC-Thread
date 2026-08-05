@@ -1,0 +1,31 @@
+# mods.toml for MC Thread (NeoForge 1.20.1, Forge-compatible).
+# Placeholders are expanded by the "generateModMetadata" Gradle task.
+modLoader="javafml" #mandatory
+loaderVersion="${loader_version_range}" #mandatory
+license="${mod_license}"
+issueTrackerURL="https://github.com/TaoLe-si/MC-Thread/issues"
+
+[[mods]] #mandatory
+modId="${mod_id}" #mandatory
+version="${mod_version}" #mandatory
+displayName="${mod_name}" #mandatory
+displayURL="https://github.com/TaoLe-si/MC-Thread"
+authors="${mod_authors}"
+description='''${mod_description}'''
+
+[[mixins]]
+config="mcthread.mixins.json"
+
+[[dependencies.${mod_id}]]
+modId="forge"
+mandatory=true
+versionRange="${forge_version_range}"
+ordering="NONE"
+side="BOTH"
+
+[[dependencies.${mod_id}]]
+modId="minecraft"
+mandatory=true
+versionRange="${minecraft_version_range}"
+ordering="NONE"
+side="BOTH"
