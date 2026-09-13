@@ -1,0 +1,3157 @@
+
+《Minecraft Runtime Research Notes》
+从 AE2 到 World IR
+Minecraft 运行时理论探索笔记
+版本「Version: Draft 0.1 Status: Ongoing Research Classification: Research Notes / Hypothesis Whitepaper」
+作者「研究发起： Minecraft 技术讨论组 主要讨论角色： 桃 。 У Ду AI研究协助： Microsoft Copilot (GPT-5)」
+副标题
+真正的问题是： Minecraft 究竟哪些部分天然适合并行， 哪些部分永远不应该并行。
+本书目标
+本书不试图直接回答：「Minecraft为什么不能多线程？」而试图回答：「Minecraft中的哪些系统满足： 快照化（Snapshot） 纯计算（Pure Compute） 无副作用（No Side Effects） 增量传播（Incremental） 事务化（Transaction） 状态所有权（Ownership）」以及：「这些条件是否足以建立： 下一代AE2 下一代科技模组 下一代Minecraft Runtime」
+研究原则
+本书遵循以下原则：
+Principle-001
+不要先设计线程。 而要先发现：「哪些计算值得被线程化。」
+Principle-002
+不要先相信优化。 而要先建立：「Profiler Replay Benchmark」体系。
+Principle-003
+不要把假说写成事实。 区分：「已证实结论 强假说 弱假说 失败路线」
+Principle-004
+讨论记录属于研究资料。 所有重要讨论：「提出 质疑 反例 修正 收敛」均应被记录。
+本书结构
+Volume I
+思想演化史 研究问题如何从：「JIT」演化为：「World IR」
+Volume II
+Minecraft约束库 包括：「共享状态 副作用 时序依赖 随机访问 Mod兼容性」
+Volume III
+失败路线库 包括：「万能VM 预测执行 缓存READ结果」等路线。
+Volume IV
+AE2案例研究 重点分析：「Craft Planner Storage Query Path Search」
+Volume V
+Profiler体系
+Volume VI
+Replay体系
+Volume VII
+Delta Network
+Volume VIII
+Snapshot Runtime
+Volume IX
+Domain VM
+Volume X
+Transaction Runtime
+Volume XI
+Folia研究
+Volume XII
+Minecraft Runtime 分类学
+Volume XIII
+Unified Runtime
+Volume XIV
+World IR
+Volume XV
+未来研究课题
+开篇问题
+本书起源于一个简单问题：「Minecraft为什么这么难多线程？」最初答案似乎非常简单：「加线程池。」随后问题变成：「不会加锁加到爆？」之后变成：「能不能VM化？」再后来变成：「哪些BlockEntity满足快照条件？」最终变成：「什么样的系统天然适合并行？」这也是本书真正的研究起点。
+读者须知
+如果你打开本书时希望看到：「一套已经证明正确的方案」那么你会失望。 因为这本书不是：「答案之书」而是：「探索之书」其中包含：
+已证实规律
+未证实假说
+被推翻路线
+未来方向
+以及所有通向这些结论的推理过程。
+第一条记录
+「Minecraft如何多线程？」 先问： 「Minecraft中什么东西本来就适合多线程？」
+Volume I · Chapter 1 将从“JIT幻想时代”开始。
+Volume I · 思想演化史
+Chapter 1
+JIT 幻想时代
+起源问题
+研究最初并不是从：「Minecraft Runtime」开始。 而是从一个更简单的问题开始：「AE2为什么慢？」随后扩展成：「Minecraft为什么不能利用多核？」
+最初出现的思路可以概括为：
+Tick
+↓
+VM
+↓
+伪字节码
+↓
+JIT
+↓
+缓存结果
+↓
+加速
+此时产生了第一个核心设想：
+Hypothesis-001
+设想如下：「原始逻辑 for (10000) { read() save() }」转换为：「NEW_BATCH_TASK PUSH READ COUNT 10000 PUSH SAVE COUNT 10000 CALL THREAD」
+目标： 不再让CPU理解：「for」而是直接理解：「任务」
+产生了一个新的问题：「如果任务可以描述 是否可以缓存？」
+于是出现：
+Hypothesis-002
+「高频任务 是否可以JIT命中？」例如：「运行10000次」直接变成：「返回缓存结果」
+当时隐含前提是：「同样输入 得到同样输出」
+第一轮质疑
+很快出现反例。 例如：
+if (gametick % 20 == 0)
+{
+    doSomething();
+}
+或者：
+SavedData.read()
+或者：
+Random.nextInt()
+这时出现第一个重要发现。
+Discovery-001
+Minecraft 大部分逻辑不是：「数学函数」而是：「状态机」
+数学函数：
+输入
+↓
+计算
+↓
+输出
+Minecraft：「世界状态 实体状态 红石状态 玩家行为 随机数 时间」共同决定结果。
+因此：「相同代码 可能得到不同结果」
+于是：
+Failed Route-001
+「缓存READ结果」基本被判定为：「不能作为通用优化方案」
+第一次转向
+JIT路线没有完全被否定。 但发生了重要收缩。
+原来目标：「优化所有逻辑」
+变成：「寻找满足条件的逻辑」
+这里诞生一个后来影响全书的思想。
+Rule-001
+不要问：「如何优化Minecraft？」先问：「什么东西值得被优化？」
+研究重点第一次从：「优化器」变成：「目标识别」
+第二轮讨论
+此时开始讨论：「多线程」
+出现一个经典问题：「不会加锁加到爆？」
+因为：「线程A」可能访问：「World」
+「线程B」也访问：「World」
+于是：「锁竞争」会越来越严重。
+这时提出一种激进思路：
+Hypothesis-003
+建立：「交互线程」
+负责：「世界修改 实体修改 NBT修改 存档写入」
+其余线程：「只计算」
+形成：
+Compute Thread
+
+↓
+
+Interaction Thread
+模式。
+这是整套研究路线里第一次出现：「状态隔离」思想。
+虽然此时还没有提出：「Snapshot」概念。
+但已经出现：「不要共享状态」的想法。
+第一次重要收敛
+此时讨论出现分叉。
+路线A：「优化JIT」
+路线B：「优化线程模型」
+后来的研究证明：「路线B更重要」
+于是得到：
+ADR-001
+JIT 可能有价值。 但：「状态隔离 远比JIT重要。」
+章节结论
+JIT幻想时代最大的贡献不是：「JIT」本身。
+而是暴露了一件事：「Minecraft不是程序执行问题。 而是状态管理问题。」
+本章最终结论
+「JIT 不是第一研究对象。 状态 才是第一研究对象。」
+引向下一章
+当研究对象从：「代码」变成：「状态」之后。 下一个问题自然产生了：「什么样的状态 能够安全移动到主线程之外？」
+Volume I · Chapter 2
+《AE2-VM 与纯函数样本的发现》
+Volume I · 思想演化史
+Chapter 2
+AE2-VM 与纯函数样本的发现
+新问题
+在 JIT 路线被削弱之后。 研究方向发生了变化。 问题不再是：「如何优化所有计算？」而变成：「什么样的计算 天然适合被优化？」
+这看起来只是措辞改变。 实际上却意味着：「系统视角 取代 优化器视角」开始成为主流。
+第一次重要观察
+随着对 AE2 合成系统的研究。 出现了一个非常特殊的现象。
+AE2 自动合成规划过程：「Pattern Library Inventory Request」输入固定。
+输出：「Craft Plan」
+并且：「生成计划期间 不会修改真实世界。」
+不会：「setBlock spawnEntity saveNBT modifyChunk」
+甚至：「库存变化」也不是在真实库存上完成。
+而是在：「模拟库存」上完成。
+这一点极其重要。 因为这是第一次发现：「Minecraft内部 存在接近纯函数的领域。」
+Pure Compute
+此时尚未形成正式术语。 但后来逐渐演化为：
+Definition-001
+Pure Compute Domain
+满足：
+输入固定
+
+↓
+
+结果固定
+
+↓
+
+不修改真实状态
+例如：「AE2 Craft Planner」
+不满足：「Hopper Redstone Entity Tick World Tick」
+这成为后续全部理论的基础。
+一个危险误区
+在此时期。 产生了一个非常自然的联想。
+如果：「AE2 Craft Planner」成功。
+那么是否说明：「所有 BlockEntity 都能这样处理？」
+这是后来被证明最危险的推论之一。
+Failed Route-002
+Universal VM
+假设：
+所有BE
+
+↓
+
+ByteCode
+
+↓
+
+VM
+
+↓
+
+Worker
+这种路线后来被基本否定。
+原因非常简单。
+AE2：「规划 只是规划」
+不修改世界。
+而：「漏斗」必须：「读取容器 修改容器」
+「红石」必须：「传播状态 改变邻居状态」
+「Create动力系统」必须：「传播应力 修改网络状态」
+这些系统：「副作用」无法忽略。
+于是出现一个全新的判断标准。
+Discovery-002
+问题不在于：「它是不是BlockEntity」
+而在于：「它有没有副作用」
+这个发现改变了整条研究路线。
+以前判断标准：「计算量」
+后来判断标准：「副作用」
+最终形成：
+Rule-002
+副作用比计算量更重要。
+Snapshot 的出现
+随着 AE2-VM 思路深化。 出现另一个概念。
+如果：「Worker 不能访问真实世界」
+那么：「Worker 看什么？」
+答案：「Snapshot」
+于是形成：
+Live State
+
+↓
+
+Snapshot
+
+↓
+
+Worker
+
+↓
+
+Result
+模式。
+第一次明确出现。
+Definition-002
+Snapshot Isolation
+工作线程：「只读取快照」
+主线程：「维护真实状态」
+两者隔离。
+不竞争。
+不加锁。
+尽可能不共享。
+后来这成为：「Snapshot Runtime」理论基础。
+Worker 真的安全吗？
+很快。 讨论进入更深入层面。
+发现一种情况。
+工作线程看起来：「只是读」
+实际上：「getSomething()」内部可能：「rebuildCache() updateInternalState()」
+即：「看起来在读 实际上在写」
+这是 Minecraft Mod 中极为常见的问题。
+后来形成：
+Constraint-001
+Hidden Side Effect
+隐藏副作用。
+判断纯函数时。 不能相信：「getter」名字。
+必须相信：「源码行为。」
+这是后来所有 Snapshot 理论都必须面对的问题。
+AE2-VM 的真正价值
+经过分析。 研究逐渐收敛。
+AE2-VM 成功。 并不是因为：「VM」
+也不是因为：「JIT」
+真正原因是：「快照 纯函数 无副作用」同时成立。
+于是形成：
+ADR-002
+AE2-VM 是领域成功案例。 不是通用引擎。
+这句话后来影响极大。
+因为它明确指出：「成功案例 ≠ 普适规律」
+本章最终结论
+研究方向发生第二次重要转折。
+研究对象： 从「JIT」变成：「Snapshot」
+从：「VM」变成：「Pure Compute Domain」
+从：「优化所有东西」变成：「寻找可优化的东西」
+Rule-003
+不要问：「如何并行化Minecraft？」先问：「Minecraft哪些部分 本来就适合并行化？」
+引向下一章
+此时新的问题出现。 如果：「副作用」是真正边界。 那么：「Minecraft中 到底有哪些副作用？」
+下一章：
+Chapter 3
+副作用、状态与 Minecraft 的第一定律
+（未完待续）
+Volume I · 思想演化史
+Chapter 3
+副作用、状态与 Minecraft 的第一定律
+新问题
+AE2-VM 的研究带来了一个新发现：「不是因为VM成功 而是因为Craft Planner是纯函数」
+于是新的问题出现了：「什么叫副作用？」
+以及：「副作用为什么会毁掉并行化？」
+在大多数软件工程领域。 副作用只是一个语言概念。
+而在 Minecraft 中。 副作用几乎决定了：「一切。」
+状态的发现
+此阶段的讨论开始从：「线程」转向：「状态」
+最初很多优化思路都隐含一个假设：「计算很贵」
+后来逐渐发现：「计算未必贵。」
+真正昂贵的是：「状态同步。」
+例如：
+int result =
+    planner.plan(item);
+如果：「planner」只依赖：「Snapshot」
+那么：「多少线程都好办。」
+问题在于：
+world.setBlock(...)
+或者：
+inventory.extract(...)
+或者：
+entity.move(...)
+此时：「世界状态发生变化。」
+变化意味着：「别的系统可能受到影响。」
+而这正是 Minecraft 的核心。
+Minecraft不是模拟器
+此时产生一个重要观点。
+许多程序：
+输入
+
+↓
+
+处理
+
+↓
+
+输出
+例如：「图片压缩 视频编码 数学计算」
+这些系统天然适合：「多线程」
+Minecraft 不一样。
+Minecraft 本质上更像：「巨大的状态机。」
+任何时刻。 世界由：「Block State Entity State NBT State Player State Chunk State」共同构成。
+计算本身并不是重点。
+重点是：「谁有权修改状态？」
+于是逐渐形成一个后来非常重要的概念。
+Definition-003
+State Ownership
+状态所有权。
+任何状态。 必须回答：「属于谁？」
+例如：「这个库存 属于谁？」
+「这个实体 属于谁？」
+「这个Chunk 属于谁？」
+如果：「多个线程同时拥有」
+最终往往变成：「锁」
+或者：「崩溃」
+或者：「幽灵BUG」
+幽灵BUG
+随着讨论深入。 开始意识到：「崩溃不是最可怕的。」
+最可怕的是：「偶尔出错。」
+例如：「服务器运行100小时 正常」
+「第101小时 丢了一组钻石」
+之后：「永远无法复现。」
+这类问题后来被归类为：
+Constraint-002
+Heisenbug
+观察不到的并发错误。
+在 Minecraft Mod 环境中。 这类问题尤其严重。
+因为：「几千个Mod 默认都相信： Minecraft只有一个主线程。」
+第一次定律
+经过大量讨论。 研究开始收敛。
+最初认为：「多线程问题 是性能问题。」
+后来发现：「多线程问题 其实是状态问题。」
+于是得到全书第一个真正意义上的定律。
+Law-001
+Minecraft 第一状态定律
+首先取决于它对状态的控制能力， 而不是它的计算复杂度。
+举例：
+AE2 Craft Planner「计算量高 状态修改低」
+结果：「容易并行。」
+红石系统「计算量不高 状态传播极强」
+结果：「极难并行。」
+漏斗系统「计算量低 状态交互极高」
+结果：「极难并行。」
+Create 动力网络「计算量中等 状态传播极高」
+结果：「需要非常谨慎。」
+线程神话的破灭
+此时研究发生第三次转折。
+最初目标：「线程化Minecraft」
+随后目标：「线程化AE2」
+此时开始变成：「识别状态边界。」
+因为：「线程池 Worker VM JIT」都属于：「工具。」
+而：「状态边界」才是：「规则。」
+第一次形成：
+Rule-004
+不要先讨论：「线程。」先讨论：「状态。」
+状态分类学（雏形）
+此时开始出现第一个分类系统。
+Class A
+Pure State 特点：「可复制 可快照 无副作用」
+例：「Craft Planner Snapshot」
+Class B
+Derived State 特点：「可重新计算」
+例：「缓存 索引 路径结果」
+Class C
+Authority State 特点：「真实状态 必须唯一」
+例：「Inventory Chunk World」
+Class D
+Temporal State 特点：「依赖顺序」
+例：「红石 Tick链 实体更新」
+未来的大部分理论。 都会建立在这个分类之上。
+本章结论
+研究方向再次收缩。
+从：「如何并行？」变成：「什么状态允许并行？」
+最终形成：
+ADR-003
+线程问题只是状态问题的表现。
+ADR-004
+副作用本质上是：「状态传播。」
+Chapter Summary
+本章结束时。 研究者终于不再把：「Minecraft 看作： 一个程序」
+而开始把它看作：「一个巨大的状态系统。」
+下一章：
+Chapter 4
+Amdahl 定律：为什么线程分离不一定带来收益
+（待续）
+Volume I · 思想演化史
+Chapter 4
+Amdahl 定律：为什么线程分离不一定带来收益
+新阶段
+到目前为止。 研究已经经历三次转折。
+第一次：「JIT幻想」
+第二次：「Pure Compute Discovery」
+第三次：「状态优先」
+此时。 研究者已经不再争论：「Minecraft能不能多线程？」
+而开始讨论：「即使多线程成功 收益会有多大？」
+这是第四次重要思想转折。
+一个危险错觉
+几乎所有刚接触并行计算的人。 都会产生一个天然想法。
+例如：「CPU: 16核心」
+然后认为：
+我让Minecraft吃满16核
+
+↓
+
+性能提升16倍
+这非常符合直觉。
+也几乎总是错误的。
+Amdahl 定律登场
+在并行计算领域。 存在一个著名公式。
+Amdahl's Law
+定义：
+Speedup
+
+=
+
+1
+
+/
+
+(
+
+(1-P)
+
++
+
+P/N
+
+)
+其中：「P」表示：「可以并行化部分」
+而：「1-P」表示：「必须串行执行部分」
+第一个例子
+假设：「Minecraft Tick 20ms」组成：「18ms 串行 2ms 可并行」
+即：
+P = 10%
+即使拥有：「无限CPU核心」
+理论极限：
+20ms
+
+↓
+
+18ms
+提升：「1.11x」
+不是：「16x」
+甚至不是：「2x」
+于是出现一个残酷现实：
+Discovery-003
+能并行 不代表值得并行。
+桃路线的修正
+此时期。 讨论中出现重要修正。
+前期观点：「线程剥离 是多核优化基础」
+后期观点：「线程剥离必须建立在热点之上」
+这个区别极大。
+错误顺序：
+线程池
+
+↓
+
+调度器
+
+↓
+
+VM
+
+↓
+
+寻找工作
+正确顺序：
+Profiler
+
+↓
+
+热点分析
+
+↓
+
+发现纯计算
+
+↓
+
+快照化
+
+↓
+
+线程剥离
+后来形成：
+Rule-005
+不要先设计线程。 先设计工作。
+AE2 为什么重要
+此时。 AE2 开始被重新理解。
+AE2 最大价值并不是：「它快」
+而是：「它提供一个容易隔离的负载样本」
+例如：「Craft Planner」属于：「高计算量 低副作用」
+这是理想目标。
+这种系统即使只占：「主线程30%」
+也值得投入大量研究。
+因为：「30%」已经足以产生明显收益。
+Minecraft 的残酷现实
+此时出现另一条讨论线。
+观察：「Minecraft 很多系统并不复杂。」
+复杂的其实是：「状态同步」
+例如：「Hopper」
+逻辑非常简单：「取物品 放物品」
+计算复杂度极低。
+问题在于：「库存被改了」
+库存一变。
+可能影响：「漏斗 管道 AE网络 机器 玩家」
+于是：「状态传播」远比：「计算」昂贵。
+第一次负优化理论
+此时出现一个重要概念。
+Definition-004
+Negative Parallelism
+负并行化。
+即：「线程创建 调度 同步 回传」成本。
+大于：「实际计算成本。」
+例如：「计算 10μs」
+线程调度：「100μs」
+结果：「更慢。」
+这在 Minecraft 中极其常见。
+因此：
+Rule-006
+线程必须足够粗。
+任务粒度太小时。
+线程池本身变成性能瓶颈。
+DAG 的出现
+讨论此时开始接触：「Task Graph」思想。
+观察： 许多 BlockEntity。
+修改范围有限。
+例如：「机器A 只影响机器B」
+于是：
+A
+
+↓
+
+B
+
+↓
+
+C
+形成：「DAG」（有向无环图）
+此时产生：
+Hypothesis-004
+Minecraft 局部基地。 是否可以形成：「局部任务图？」
+如果成立。
+则存在：「局部并行」可能。
+不过。
+此阶段尚未验证。
+因此被归类为：「Strong Hypothesis」
+多核神话的终结
+经过 Amdahl 讨论。 研究发生第四次收缩。
+最初：「让Minecraft吃满所有核心」
+后来：「找到高价值并行部分」
+成为核心目标。
+于是得到：
+ADR-005
+线程化不是目标。 收益才是目标。
+以及：
+ADR-006
+并行收益 取决于：「热点比例 × 纯计算比例 × 快照可行性」
+而不是：「核心数。」
+本章总结
+本章结束后。 整个研究路线发生关键变化。
+从：「怎么拆线程」变成：「怎么发现值得拆的东西」
+形成后续路线：
+Profiler
+
+↓
+
+Replay
+
+↓
+
+Benchmark
+
+↓
+
+Workload Analysis
+
+↓
+
+Snapshot
+
+↓
+
+Worker
+而不是：
+线程池
+
+↓
+
+希望
+Chapter Conclusion
+可并行工作才是生产力。
+通向下一章
+此时新的问题诞生。
+如果：「收益来自热点」
+那么：「热点到底在哪里？」
+下一章：
+Chapter 5
+Profiler First：不要优化你尚未测量的东西
+（待续）
+Volume I · 思想演化史
+Chapter 5
+Profiler First：不要优化你尚未测量的东西
+新问题
+经过前几章。 研究已经得出几个重要结论。
+已知事实
+「JIT不能解决状态问题 Snapshot比线程更重要 副作用决定可并行性 Amdahl决定收益上限」
+于是产生新的问题：「到底什么东西慢？」
+这看起来像废话。 实际上这是整个研究计划最重要的转折点之一。
+因为直到此时。 绝大多数讨论仍然依赖：「感觉」
+例如：「AE2应该很慢 Craft Planner应该很慢 P2P应该很慢 Storage Bus应该很慢」
+这些判断。 没有证据。
+Discovery-004
+“觉得慢”不是证据。
+这是后续所有 Runtime 研究的基础原则。
+因为：「优化错误目标 比不优化更糟糕。」
+一个真实例子
+假设存在：「Grid Tick 10ms」
+开发者推测：「Craft Planner」占据：「50%」
+于是投入：「两个月」优化。
+结果发现：「Craft Planner 只有0.5ms」
+而真正慢的是：「Storage Query 7ms」
+两个月浪费。
+于是第一次出现：
+Rule-007
+不要优化假想热点。 先证明热点存在。
+Profiler 的诞生
+此时研究开始从：「Runtime」转向：「Measurement」
+问题开始变成：「如何看见Minecraft正在干什么？」
+于是提出：
+Hypothesis-005
+AE2需要自己的Profiler。
+理由非常简单。
+Spark能告诉你：「CraftingService 18%」
+但不能告诉你：「哪一个Grid？ 哪一个Storage Bus？ 哪一个P2P？ 哪一个CPU？」
+这属于：「函数级分析」
+而研究需要：「领域级分析」
+AE2 Profiler
+第一次设想如下：
+记录：「Grid ID Node Count P2P Count Channel Count Storage Count」
+每Tick统计：「Storage Tick Craft Tick Energy Tick Grid Tick」
+输出：「Grid #17 Nodes: 5321 Storage: 1.4ms Craft: 2.8ms Energy: 0.6ms」
+第一次。 性能信息变成：「网络层」而不是：「函数层」
+Topology Profiler
+研究继续推进。
+发现：「耗时 可能和拓扑有关。」
+例如：「5000节点」为什么慢？
+原因可能是：「最长路径」太长。
+或者：「P2P跳数」太多。
+于是提出：
+Hypothesis-006
+性能受拓扑结构影响。
+需要记录：「Average Degree Longest Path P2P Hop Component Size」
+后来成为：「Topology Analyzer」理论来源。
+Benchmark 的出现
+此时发生新的争论。
+即使发现热点。
+又如何证明：「优化成功？」
+例如：「旧算法 30ms」
+优化后：「感觉快一些」
+这不属于工程。
+于是提出：
+Rule-008
+所有优化必须可重复验证。
+于是：「Benchmark」进入研究体系。
+设计：「Small Grid Medium Grid Large Grid Craft Storm」
+固定输入。
+固定环境。
+固定结果。
+以后所有优化：「必须跑同一套测试。」
+Replay 的出现
+Benchmark解决一部分问题。
+但不解决：「真实服务器」问题。
+例如：「某服务器 每天晚上TPS下降」
+如何研究？
+于是出现：
+Hypothesis-007
+Replay System
+记录：「Craft Request Inventory Change Grid Event Storage Event」
+形成：「Replay File」
+以后：「离线重放。」
+这样：「旧版本」和：「新版本」可以比较。
+第一次出现：「科学实验」意义上的对照组。
+Profiler First Principle
+随着讨论推进。 形成一个后来极为重要的原则。
+Principle-005
+Profiler First
+顺序必须是：
+Measure
+
+↓
+
+Observe
+
+↓
+
+Replay
+
+↓
+
+Benchmark
+
+↓
+
+Optimize
+不得变成：
+Optimize
+
+↓
+
+Hope
+这后来成为：「Minecraft Runtime Research」核心原则。
+第一次技术树
+到本章结束。 研究终于形成：
+Profiler
+
+↓
+
+Replay
+
+↓
+
+Benchmark
+
+↓
+
+Workload Analysis
+
+↓
+
+Snapshot
+
+↓
+
+Worker
+
+↓
+
+Transaction
+
+↓
+
+Runtime
+这是第一棵完整技术树。
+注意。
+直到现在。
+仍然没有：「线程池」
+也没有：「万能VM」
+原因很简单。
+研究发现：「测量 比优化更重要。」
+Law-002
+无法测量的问题。 通常也无法正确优化。
+本章总结
+本章标志着研究进入：「数据驱动阶段」
+此前：「所有优化 来自想法。」
+此后：「所有优化 必须来自证据。」
+ADR-007
+Profiler先于线程。
+ADR-008
+Replay先于Runtime。
+ADR-009
+Benchmark先于优化。
+Chapter Conclusion
+“怎么让AE2快十倍？” 先问： “AE2到底把时间花在了哪里？”
+下一章
+Chapter 6
+Replay System：构建 Minecraft 的时间机器
+（待续）
+Volume I · 思想演化史
+Chapter 6
+Replay System：构建 Minecraft 的时间机器
+新问题
+Profiler 解决了：「哪里慢？」的问题。
+Benchmark 解决了：「能不能重复测试？」的问题。
+但还有一个更加困难的问题。
+例如：「服务器每天晚上8点开始TPS下降。」
+或者：「玩家开启大型自动合成后。 AE2延迟飙升。」
+甚至：「某个服务器运行72小时后。 开始随机卡顿。」
+这些问题。
+无法通过：「单次Profiler」解决。
+因为：「Profiler 只看现在。」
+而研究需要：「看历史。」
+于是出现：
+Hypothesis-008
+Minecraft需要：「Replay System」
+即：
+记录过去
+
+↓
+
+重放过去
+时间机器问题
+研究进入新的阶段。
+大家开始意识到。 Minecraft本质上是一种：「状态系统」
+所以：「状态历史」本身具有极高价值。
+例如：「当前库存」信息有限。
+而：「库存变化历史」信息量巨大。
+例如：「10000 Iron」无法说明问题。
+但：「+100 -50 +20 -300」构成的时间序列。
+可以揭示：「系统行为。」
+第一次出现：
+Rule-009
+历史比快照更重要。
+因为：「快照告诉你： 世界是什么。」
+而：「历史告诉你： 世界为什么会变成这样。」
+Replay 的定义
+经过讨论。 形成第一个正式定义。
+Definition-005
+Replay
+Replay 并不是：「录视频。」
+而是：「记录状态变化事件。」
+例如：「Craft Request Storage Change Grid Rebuild Channel Event Node Event」
+而不是：「屏幕画面」
+Replay 关注：「系统行为」而不是：「用户视角」
+Event Log
+于是出现：
+Definition-006
+Event Log
+记录：
+Time
+
+↓
+
+Event
+
+↓
+
+Parameters
+例如：「Tick 1200 Craft Request Item: Processor Count: 100」
+或者：「Tick 1300 Grid Rebuild Grid: 17」
+最终形成：「事件流」
+此时。 研究第一次与：「数据库 消息系统 事件溯源」产生联系。
+Event Sourcing
+后来研究发现。 Replay 实际上很接近一种成熟思想：
+Event Sourcing
+即：「记录变化 而不是记录结果。」
+例如： 不记录：「Inventory: 1000 Iron」
+记录：「+100 -20 +500」
+最终：「重新计算出状态。」
+这一思想后来影响：「Transaction Runtime」设计。
+第一个重大用途
+Replay 最直接用途并不是优化。
+而是：「复现Bug。」
+这在 Minecraft 中意义巨大。
+例如：「服务器运行45小时后。 丢失物品。」
+传统方法：「无法复现。」
+Replay 方法：
+读取日志
+
+↓
+
+重放
+
+↓
+
+定位问题。
+于是形成：
+Discovery-005
+Replay 是调试工具。 在成为优化工具之前。
+Benchmark 与 Replay
+此时出现新的组合。
+Profiler：「发现问题。」
+Replay：「保存问题。」
+Benchmark：「重复问题。」
+第一次形成完整闭环。
+Profiler
+
+↓
+
+Replay
+
+↓
+
+Benchmark
+
+↓
+
+优化
+
+↓
+
+验证
+这一链条后来成为：「Minecraft Runtime Research」核心工作流。
+Deterministic Replay
+随着讨论深入。 开始出现更激进方向。
+Hypothesis-009
+Deterministic Replay
+如果：「所有输入固定」
+那么：「系统是否应该得到同样结果？」
+例如：「同样库存 同样样板 同样请求」
+理论上：「应该得到同样规划结果。」
+如果出现：「不同结果」
+则说明：「存在隐藏状态。」
+这后来成为：「检测副作用」的重要工具。
+Replay 与 AE2
+此时。 Replay 首次开始与 AE2 深度结合。
+建议记录：「Craft Request」
+「Pattern Lookup」
+「Storage Query」
+「Grid Rebuild」
+形成：「AE2 Event Stream」
+这样：「同一次大型自动合成」可以被无限重放。
+第一次具备：「离线研究能力。」
+Replay 文件格式（早期假说）
+出现初步设想。
+Header
+
+↓
+
+World Info
+
+↓
+
+Grid Snapshot
+
+↓
+
+Event Stream
+
+↓
+
+Metrics
+未来甚至可以形成：「.aer AE Replay」格式。
+注意。
+此时仍属于：「强假说」
+尚未验证工程可行性。
+Replay 的真正意义
+经过讨论。 研究逐渐发现。
+Replay 最大价值并不是：「回放。」
+而是：「把未来研究从实时环境中剥离出来。」
+以前：「必须开服务器研究。」
+以后：「离线即可研究。」
+影响巨大。
+因为：「Profiler Snapshot Delta Network Transaction VM」
+全部可以：「离线测试。」
+第二棵技术树
+研究开始形成：
+Profiler
+
+↓
+
+Replay
+
+↓
+
+Benchmark
+
+↓
+
+Experiment
+
+↓
+
+Optimization
+与第一棵运行时技术树并存。
+未来：「一棵负责研究 一棵负责实现」
+本章结论
+Replay 的出现。 标志研究正式进入：「实验科学阶段。」
+此前：「猜测。」
+此后：「可复现验证。」
+ADR-010
+Replay先于Runtime。
+ADR-011
+可重放性高于单次优化。
+ADR-012
+任何优化路线。 应尽可能建立Replay支撑。
+Chapter Conclusion
+那么 Replay 就是时间机器。
+通向下一章
+此时新的问题出现。
+既然：「Replay 保存了历史」
+那么：「是否真的需要每Tick重新计算？」
+下一章：
+Chapter 7
+Delta Network：为什么我们总是在重复计算已经知道的答案？
+（待续）
+Volume I · 思想演化史
+Chapter 7
+Delta Network：为什么我们总是在重复计算已经知道的答案？
+新问题
+Replay 的出现。 让研究第一次能够观察：「系统随时间如何变化」而不仅仅是：「系统此刻是什么样子」
+于是新的疑问诞生。
+如果：「Craft Planner Storage Query Network Search」在 Replay 中被完整记录。
+那么是否能够回答：「这些计算真的有必要每Tick执行吗？」
+这个问题后来成为：「Delta Network」理论的起点。
+第一次观察
+在许多科技模组中。 研究者发现一个非常奇怪的现象。
+网络正在不停计算。
+但是：「网络并没有变化。」
+例如：「AE2 Grid 5000节点」
+连续：「1000 Tick」
+期间：「没有新增电缆 没有删除节点 没有新增设备 没有改变拓扑」
+但是：「大量逻辑仍然持续执行。」
+于是产生：
+Discovery-006
+大量计算发生在：「已知状态」上。
+一个重要比喻
+此时研究开始借鉴数据库理论。
+想象：「数据库」拥有：「100万条记录」
+其中：「999999条没有变化」
+只有：「1条发生变化」
+现代数据库不会：「重新扫描100万条记录。」
+而会：「传播变化。」
+于是产生一个大胆想法。
+Hypothesis-010
+Minecraft网络系统。 是否能够：「传播变化 而非传播状态？」
+这个想法后来成为：「Delta Network」名字的来源。
+Full Scan
+研究开始定义旧模式。
+Definition-007
+Full Scan
+每次计算：「重新读取全部状态」
+例如：「遍历全部Storage Bus 遍历全部Node 遍历全部Grid」
+然后重新生成结果。
+这种方式：「简单 可靠」
+但代价：「重复。」
+Delta
+随后定义：
+Definition-008
+Delta
+状态变化本身。
+例如：「+1 Iron」
+不是：
+Inventory = 10001
+而是：
+Inventory += 1
+关注：「变化」而不是：「结果。」
+第一个模型
+于是形成：
+State
+
+↓
+
+Delta
+
+↓
+
+Propagation
+
+↓
+
+Update
+而不是：
+State
+
+↓
+
+Rescan
+
+↓
+
+Recompute
+
+↓
+
+Update
+这是根本区别。
+Dirty Node
+讨论继续深入。
+如何知道：「哪里发生变化？」
+于是提出：
+Definition-009
+Dirty Node
+发生变化的节点。
+例如：「Storage Bus」插入物品。
+则：「Storage Bus」成为：「Dirty」
+而：「其余4999节点」保持：「Clean」
+Change Tree
+随后进一步推广。
+如果：「节点A」变化。
+可能影响：「节点B 节点C」
+于是形成：
+A
+
+↓
+
+B
+
+↓
+
+C
+变化传播链。
+定义：
+Definition-010
+Change Tree
+变化传播树。
+系统只更新：「受影响部分。」
+而不是：「整个网络。」
+第二次重大收敛
+此时研究方向发生变化。
+原来的问题：「如何更快计算？」
+逐渐变成：「为什么要计算？」
+这个变化非常关键。
+因为：「多线程 优化器 JIT」都是：「加快计算」
+而：「Delta」试图：「消灭计算」
+于是形成：
+Rule-010
+最好的计算。 是不发生的计算。
+Replay带来的证据
+Replay 在这里首次发挥战略价值。
+研究者可以统计：
+「Storage Scan 100000次」
+真实变化：
+「23次」
+如果成立。
+则意味着：「99977次 是重复劳动。」
+第一次获得：「量化证据。」
+Cache 与 Delta
+此时讨论出现一个历史分支。
+路线A：「缓存结果」
+路线B：「缓存变化」
+研究最后倾向于：「路线B。」
+原因：「结果容易失效。」
+而：「变化天然携带上下文。」
+例如：
+缓存：
+Inventory = 1000
+变化：「+50」
+显然后者更容易维护。
+Delta Network 的潜在收益
+理论上。
+如果：「网络规模 线性增长。」
+而：「变化数量 保持稳定。」
+则：
+旧模式：「O(N)」
+新模式：「O(Δ)」
+其中：
+Δ = Changes
+这成为整条路线最诱人的地方。
+Strong Hypothesis-001
+大型科技网络中。
+「变化量 远小于 状态量。」
+如果成立。
+Delta Network 的收益。 可能远超：「线程化。」
+风险出现
+当然。 问题也立即产生。
+Risk-001
+Delta 漏更新。
+例如：「某个变化 没有传播。」
+系统状态：「错误。」
+而且：「长期积累。」
+最终：「数据损坏。」
+因此。 Delta 系统需要：「校验机制。」
+这一问题后来催生：「Transaction Runtime」路线。
+Delta 与 AE2
+此时形成第一个明确猜想。
+AE2 Delta Hypothesis
+AE2 大量时间消耗在：「重复观察未变化网络。」
+如果成立。
+未来优化路线：「Storage Delta Grid Delta Craft Delta」
+将可能带来：「数量级收益。」
+注意。
+此时仍是：「假说。」
+尚未被 Profiler 与 Benchmark 证实。
+本章总结
+Delta Network 的出现。 代表研究第五次重大转折。
+从：「怎么提高计算速度」变成：「怎么减少计算次数」
+并形成：
+ADR-013
+增量计算优先于重复计算。
+ADR-014
+Replay 是 Delta 研究的前提。
+ADR-015
+变化比状态更值得记录。
+Chapter Conclusion
+那么问题不在于它算得太慢。 而在于它根本不该再算一次。
+通向下一章
+当变化开始替代状态。 新的问题出现：「如果Worker不直接接触真实世界。 它究竟该看什么？」
+Chapter 8
+Snapshot Runtime：复制世界，而不是竞争世界
+（待续）
+Volume I · 思想演化史
+Chapter 8
+Snapshot Runtime：复制世界，而不是竞争世界
+新问题
+Delta Network 出现之后。 研究方向再次发生变化。
+之前的问题是：「为什么重复计算？」
+现在的问题是：「如果Worker不能访问世界。 Worker看什么？」
+因为一旦接受：「不共享状态」原则。
+便立刻面临一个难题。
+例如：「Craft Planner」需要：「库存 样板 请求」
+如果：「Worker」直接访问：「Live Inventory」
+那么：「主线程 Worker」同时读写。
+问题重新出现。
+于是。
+研究第一次真正接触：「Snapshot」理论。
+世界的影子
+此时出现一个重要比喻。
+过去的思路：
+Worker
+
+↓
+
+看真实世界
+新的思路：
+Worker
+
+↓
+
+看世界的影子
+这个影子。 就是：「Snapshot」
+而不是：「World」
+研究开始意识到。
+真正需要的不是：「共享世界」
+而是：「共享世界的复制品」
+Snapshot 的定义
+随着讨论深入。 形成：
+Definition-011
+Snapshot
+某一时刻的：「状态复制」
+并满足：「只读 不可修改 保持一致」
+例如：「Inventory Snapshot」
+内容：
+Iron = 1000
+
+Gold = 500
+
+Silicon = 50
+Worker：「读取」
+但：「不能修改。」
+第一种模型
+于是形成：
+Live State
+
+↓
+
+Snapshot
+
+↓
+
+Worker
+
+↓
+
+Result
+而主线程：「继续运行」
+不等待Worker。
+这是第一次真正出现：「数据隔离」思想。
+Lock-Free 幻觉
+很多人第一次接触Snapshot。 容易产生误解。
+认为：「不用锁」
+等于：「解决了一切。」
+实际上不是。
+Snapshot 解决的是：「竞争。」
+不是：「一致性。」
+因为：「世界在变化。」
+而：「Snapshot 已经冻结。」
+于是形成新问题。
+Discovery-007
+Snapshot 可能过期。
+例如：「Tick 1000 创建Snapshot」
+Worker：「开始规划」
+期间：「玩家拿走物品」
+或者：「机器消耗库存」
+此时：「Snapshot 与真实世界 已经不同。」
+Validation
+因此提出：
+Definition-012
+Validation
+结果提交前。 必须验证：「世界是否仍满足假设。」
+即：
+Snapshot
+
+↓
+
+Compute
+
+↓
+
+Validate
+
+↓
+
+Commit
+第一次出现：「四阶段模型。」
+后来。
+Transaction Runtime。 几乎完全建立在此基础上。
+Snapshot 与数据库
+此时研究逐渐发现。
+Minecraft中的很多问题。 实际上已经被数据库解决过。
+例如：「事务 快照 MVCC 一致性」
+都和：「Snapshot Runtime」极度相似。
+引入新的思考。
+Observation-001
+Minecraft Runtime 可能更接近数据库。 而不是传统游戏引擎。
+因为：「问题来源： 状态一致性。」
+而不是：「图形渲染。」
+Snapshot Taxonomy
+随着研究继续。 Snapshot开始分类。
+Type A
+Inventory Snapshot
+包含：「物品 数量」
+Type B
+Craft Snapshot
+包含：「Pattern Recipe Graph」
+Type C
+Network Snapshot
+包含：「Node Edge Channel」
+Type D
+World Snapshot
+包含：「Block Entity Chunk」
+难度最高。
+风险最高。
+也是后来最具争议的一类。
+AE2 再次成为样本
+此时。 AE2的重要性进一步上升。
+研究发现：「AE2 Craft Planner」非常适合作为：「Snapshot Runtime」实验对象。
+原因：
+需要的数据有限。
+例如：「Inventory Snapshot Pattern Snapshot Request」
+即可运行。
+不需要：「真实Entity 真实Chunk 真实World」
+因此：「风险最低。」
+形成：
+ADR-016
+AE2 是 Snapshot Runtime 的理想实验场。
+Worker Never Touch Live State
+随着讨论推进。 形成第一个硬规则。
+Rule-011
+Worker 永远不要直接访问 Live State。
+哪怕：「getAvailableStacks()」看起来只是读取。
+也不允许。
+因为：「你不知道它是否带副作用。」
+于是形成：
+Main Thread
+
+↓
+
+Build Snapshot
+
+↓
+
+Worker
+
+↓
+
+Result
+
+↓
+
+Validate
+
+↓
+
+Commit
+成为后续所有设计基础。
+Snapshot Runtime 的边界
+当然。 Snapshot 不是万能解。
+例如：「红石」
+需要：「顺序 传播 反馈」
+Snapshot之后。
+可能得到：「另一个游戏。」
+再例如：「Entity AI」
+也很难冻结为：「稳定Snapshot」
+因此：
+Constraint-003
+不是所有系统都适合 Snapshot。
+必须满足：「状态可复制 副作用可隔离 结果可验证」
+才有资格进入：「Snapshot Runtime」
+Snapshot 第一原理
+经过大量讨论。 形成：
+Law-003
+Snapshot First Law
+那么它大概率也无法安全并行化。
+这是全书最重要的定律之一。
+因为：「线程 VM Worker Task Graph」
+全部建立在：「Snapshot」之上。
+本章总结
+本章标志研究进入：「Runtime时代。」
+此前。
+关注：「热点 变化 Profiler」
+此后。
+开始真正设计：「运行时架构。」
+形成：
+ADR-017
+Snapshot先于Worker。
+ADR-018
+Validation不可省略。
+ADR-019
+Live State 属于主线程。
+Chapter Conclusion
+给每个线程一个世界的副本。
+通向下一章
+新的问题随之出现：「如果Worker越来越多。 如何管理它们之间的依赖关系？」
+Chapter 9
+Task Graph：从线程到任务
+（待续）
+Volume I · 思想演化史
+Chapter 9
+Task Graph：从线程到任务
+新问题
+Snapshot Runtime 建立之后。 研究终于摆脱了一个长期困扰的问题：「Worker是否应该直接接触世界？」
+答案已经明确。
+「不应该。」
+于是新的问题出现。
+如果：「Worker 越来越多」
+那么：「谁来管理它们？」
+最初的思路非常简单。
+Task
+
+↓
+
+Thread Pool
+
+↓
+
+Result
+但很快出现问题。
+因为：「任务之间 并不独立。」
+第一次依赖问题
+例如：「Craft Planner」需要：「Storage Query 结果」
+而：「Storage Query」又依赖：「Network Snapshot」
+于是：
+Network Snapshot
+
+↓
+
+Storage Query
+
+↓
+
+Craft Planner
+形成顺序关系。
+不是：「三个任务同时执行」
+而是：「一个任务 依赖另一个任务」
+这是研究第一次真正接触：「依赖图」概念。
+Thread Thinking 的局限
+此时研究者逐渐意识到。
+很多讨论里的核心单位一直是：「线程」
+例如：「线程A 线程B 线程C」
+但实际上。
+线程只是：「资源。」
+而不是：「工作。」
+这成为一个重要突破。
+Discovery-008
+线程不是调度单位。 任务才是调度单位。
+这是整套 Runtime 理论的重要转折。
+因为：「CPU核心」数量固定。
+而：「Task」数量可能极大。
+于是研究目标从：「线程调度」转向：「任务调度」
+DAG 的重新出现
+此前。 DAG 曾作为一个模糊概念出现。
+现在。 它第一次变成正式研究对象。
+Definition-013
+Task Graph
+任务之间依赖关系构成的图。
+例如：
+Snapshot
+
+↓
+
+Storage Query
+
+↓
+
+Craft Planner
+
+↓
+
+Commit
+可表示为：
+A
+
+↓
+
+B
+
+↓
+
+C
+
+↓
+
+D
+这本质上是：「有向图。」
+如果不存在循环依赖。
+则进一步成为：「DAG (Directed Acyclic Graph)」
+从 Tick 到 Graph
+此时产生一个极具影响力的设想。
+传统模型：
+Tick
+
+↓
+
+执行全部逻辑
+Runtime模型：
+Tick
+
+↓
+
+构建任务图
+
+↓
+
+执行任务图
+这是根本性的变化。
+因为：「Tick 本身并不重要。」
+重要的是：「需要完成哪些工作。」
+于是形成：
+Hypothesis-011
+Minecraft Tick 是否可以表达为：「Task Graph」？
+这个问题后来成为：「World IR」路线的重要来源。
+任务粒度问题
+新的问题很快出现。
+什么叫：「Task？」
+例如：「一个AE2网络」
+是否是：「一个Task」？
+还是：「1000个Task」？
+此时产生：
+Constraint-004
+任务粒度。
+如果：「Task太大」
+则：「并行度低。」
+如果：「Task太小」
+则：「调度开销爆炸。」
+因此形成：
+Rule-012
+Task 应该尽可能粗。 但不能破坏并行性。
+后来。 这成为：「Negative Parallelism」理论的重要组成部分。
+Scheduler 的诞生
+当 Task Graph 出现后。
+一个新的组件不可避免地诞生。
+Definition-014
+Scheduler
+负责：
+发现可运行任务
+
+↓
+
+分配Worker
+
+↓
+
+回收结果
+注意。
+此时：「Thread Pool 只是工具。」
+而：「Scheduler 才是系统核心。」
+第一次出现：「Runtime」真正意义上的调度器思想。
+AE2 的位置变化
+在此之前。
+AE2 一直被看作：「优化目标。」
+此时开始变化。
+AE2 被重新定义为：「测试场。」
+因为：「Craft Planner Storage Query Path Search」都非常适合：「Task Graph」实验。
+因此形成：
+ADR-020
+AE2 不只是被优化对象。 也是 Runtime 研究实验平台。
+Task Graph 与 Snapshot
+此时形成一个关键组合。
+Snapshot
+
+↓
+
+Task Graph
+
+↓
+
+Scheduler
+
+↓
+
+Worker
+
+↓
+
+Result
+
+↓
+
+Validation
+
+↓
+
+Commit
+这是目前整套研究中。 最完整的一条运行链。
+值得注意的是。
+直到这里：
+仍然没有出现：「Folia World IR Unified Runtime」
+它们尚未进入研究视野。
+但基础已经开始出现。
+第一次 Runtime 雏形
+到本章末尾。 第一次能够画出：
+Main Thread
+
+↓
+
+Build Snapshot
+
+↓
+
+Task Graph
+
+↓
+
+Scheduler
+
+↓
+
+Worker Pool
+
+↓
+
+Validation
+
+↓
+
+Commit
+的完整结构。
+这已经不再是：「优化Mod」层面。
+而开始接近：「运行时架构」层面。
+本章总结
+Task Graph 的出现。 代表研究进入：「调度时代。」
+此前问题：「怎么并行？」
+现在问题：「如何组织并行？」
+形成：
+ADR-021
+线程不是第一公民。 任务才是第一公民。
+ADR-022
+Scheduler 比 Thread Pool 更重要。
+ADR-023
+Task Graph 是 Runtime 的核心抽象。
+Chapter Conclusion
+“把哪些线程跑起来？” 应该思考： “哪些工作彼此独立？”
+通向下一章
+当 Task Graph 成立之后。 新的问题出现：「如果任务计算出来的结果已经过期怎么办？」
+因为：「世界一直在变。」
+Chapter 10
+Validation：为什么正确性比并行性更重要
+（待续）
+Volume I · 思想演化史
+Chapter 10
+Validation：为什么正确性比并行性更重要
+新问题
+Task Graph 出现之后。 研究终于拥有：
+Snapshot
+
+↓
+
+Task Graph
+
+↓
+
+Scheduler
+
+↓
+
+Worker
+完整链路。
+看起来。 问题已经解决。
+Worker 可以计算。
+Scheduler 可以调度。
+Task Graph 可以表达依赖。
+那么：「还缺什么？」
+答案是：「现实。」
+因为：「世界一直在变。」
+第一个悖论
+设想如下。
+Tick 1000：
+Inventory
+
+Iron = 1000
+主线程：「创建 Snapshot」
+Worker：「开始规划」
+与此同时：「玩家打开终端」并提取：「500 Iron」
+此时真实世界：
+Iron = 500
+而 Worker 仍然认为：
+Iron = 1000
+最终。 Worker 返回：「Craft Plan」
+问题来了。
+这个结果：「正确吗？」
+答案：「不知道。」
+于是研究进入新的阶段。
+Discovery-009
+并行化没有创造真实性。
+它只是：「加快计算。」
+而：「正确性 必须另外保证。」
+第一次现实冲击
+此前讨论中。 大家经常默认：
+Snapshot
+
+↓
+
+Compute
+
+↓
+
+Commit
+天然成立。
+事实上不是。
+因为：「Snapshot 属于过去。」
+而：「Commit 发生在未来。」
+两者之间：「时间流逝。」
+这是整个 Runtime 理论第一次正面对待：「时间问题。」
+Validation 的出现
+于是形成：
+Definition-015
+Validation
+在结果正式提交之前。 重新验证：「假设是否仍然成立。」
+即：
+Snapshot
+
+↓
+
+Compute
+
+↓
+
+Validate
+
+↓
+
+Commit
+Validation 成为新的必经阶段。
+而不是：「可选阶段。」
+数据库的影子
+此时研究再次发现。 Minecraft 正在重复数据库几十年前解决过的问题。
+例如：
+数据库事务：
+Read
+
+↓
+
+Compute
+
+↓
+
+Validate
+
+↓
+
+Commit
+与：「Snapshot Runtime」极其相似。
+于是形成：
+Observation-002
+Minecraft Runtime 越来越像数据库。
+而不是：「传统游戏循环。」
+Validation Strategy
+随着讨论深入。 形成多个验证层级。
+Layer 1
+Snapshot Check
+验证：「Snapshot Version」是否过期。
+例如：「Inventory Version 仍然一致」
+则：「通过。」
+否则：「失败。」
+Layer 2
+State Check
+验证：「关键状态」是否发生变化。
+例如：
+Iron >= 500
+是否仍成立。
+这是：「逻辑验证。」
+Layer 3
+Dependency Check
+验证：「依赖链」是否失效。
+例如：「Pattern 是否改变 Network 是否重构」
+这是：「结构验证。」
+第一次失败恢复
+Validation 出现后。 立即引出新问题。
+如果失败怎么办？
+例如：「Validate 失败」
+此时：「Commit」不能执行。
+于是形成：
+Definition-016
+Retry
+重新创建：「Snapshot」
+重新：「Compute」
+最终：「重新Validation。」
+即：
+Snapshot
+
+↓
+
+Compute
+
+↓
+
+Validate
+
+↓
+
+Fail
+
+↓
+
+Retry
+这是后续 Transaction Runtime 最重要的基础之一。
+乐观并发控制
+此时。 研究开始接触数据库中的另一思想。
+即：
+Optimistic Concurrency
+思路：
+不要锁。
+先算。
+最后验证。
+如果失败。
+重新来。
+模型：
+Assume Success
+
+↓
+
+Compute
+
+↓
+
+Validate
+
+↓
+
+Retry
+与传统：
+Lock
+
+↓
+
+Compute
+
+↓
+
+Unlock
+完全不同。
+研究开始明显偏向：「乐观路线。」
+因为：「Minecraft 共享状态太多。」
+锁成本极高。
+Validation Cost
+当然。 Validation 不是免费的。
+每次 Validation：「都需要检查状态。」
+因此出现：
+Constraint-005
+Validation 本身会产生开销。
+于是形成平衡：
+Validation 太少：「错误结果。」
+Validation 太多：「性能下降。」
+这成为未来 Runtime 设计必须处理的问题。
+AE2 的优势再次出现
+此时研究再次发现。
+AE2 非常适合作为：「Validation 实验场。」
+因为：「库存版本」容易记录。
+例如：「Inventory Version 42」
+Worker：「记录 Version」
+Commit 时：「检查 Version」
+如果：「42 仍然是 42」
+结果有效。
+否则：「重新规划。」
+这是非常干净的 Validation 模型。
+于是形成：
+ADR-024
+AE2 是 Validation Runtime 的理想验证对象。
+正确性与性能
+此时研究产生重要共识。
+过去：「性能第一。」
+现在：「正确性第一。」
+因为：「快一点但错了」没有意义。
+尤其：「库存 物品 合成结果」
+属于：「权威状态。」
+一旦错误。
+后果极其严重。
+因此形成： 因此形成：
+Law-004
+Correctness Before Performance
+正确性优先于性能。
+这是全书第四条核心定律。
+Runtime 新链路
+到本章结束。 运行链路发生变化。
+过去：
+Snapshot
+
+↓
+
+Compute
+
+↓
+
+Commit
+现在：
+Snapshot
+
+↓
+
+Compute
+
+↓
+
+Validate
+
+↓
+
+Commit
+第一次真正具备：「工程可行性。」
+本章总结
+Validation 的出现。 标志研究进入：「Correctness Era」
+此前：「如何并行？」
+此后：「如何保证并行后仍然正确？」
+成为核心问题。
+形成：
+ADR-025
+Validation 不可省略。
+ADR-026
+Snapshot 必须可验证。
+ADR-027
+乐观并发优于大规模锁。
+Chapter Conclusion
+而是在你没有察觉的情况下变错。
+通向下一章
+现在。 系统已经拥有：「Snapshot Task Graph Scheduler Worker Validation」
+新的问题终于出现：「如果把 Validation 推到极致。 是否可以把整个世界看成一个事务？」
+Chapter 11
+Transaction Runtime：把 Minecraft 当成数据库
+（待续）
+Volume I · 思想演化史
+Chapter 11
+Transaction Runtime：把 Minecraft 当成数据库
+新问题
+经过前面的研究。 系统已经逐渐形成：
+Snapshot
+
+↓
+
+Task Graph
+
+↓
+
+Scheduler
+
+↓
+
+Worker
+
+↓
+
+Validation
+
+↓
+
+Commit
+的完整链路。
+此时研究者突然发现一个现象。
+整个链条与传统游戏架构越来越不像。
+反而越来越像：「数据库」
+于是出现一个大胆问题。
+Hypothesis-012
+如果：「Validation 已经存在」
+那么：「Minecraft状态修改 是否可以被视为事务？」
+这一问题最终开启：「Transaction Runtime」路线。
+什么是事务
+传统Minecraft中的操作。 普遍长这样：
+取出铁锭
+
+↓
+
+修改库存
+
+↓
+
+放入机器
+
+↓
+
+修改机器状态
+
+↓
+
+更新网络
+整个过程。 不断修改世界。
+并且：「没有统一边界。」
+任何一步失败。
+系统都可能进入：「半完成状态。」
+例如：「铁锭已经扣除 机器没有收到」
+或者：「库存变化 网络缓存没更新」
+这种问题。 在数据库领域有统一名称。
+Definition-017
+Partial Update
+部分更新。
+即：「状态已经改变 但流程尚未完成」
+这是很多幽灵Bug的来源。
+Database 思维进入 Minecraft
+此时研究开始借鉴数据库事务。
+数据库事务：
+Read
+
+↓
+
+Execute
+
+↓
+
+Commit
+如果失败：「Rollback」
+而不会留下：「半成品状态」
+于是产生一个想法。
+Hypothesis-013
+Minecraft操作。 是否也可以表达为：「事务。」
+例如：
+传统：
+Iron -= 100
+
+↓
+
+Gold += 30
+
+↓
+
+Silicon -= 20
+立即修改。
+事务化：「Transaction Iron -100 Gold +30 Silicon -20」
+先记录。
+然后：「Commit」
+一次提交。
+写时提交
+由此出现：
+Definition-018
+Write-on-Commit
+计算期间：「不修改真实状态」
+只生成：「Transaction Record」
+例如：「Inventory Δ Iron -100 Δ Gold +30」
+直到：「Commit」发生。
+真实世界才被修改。
+第一次实现：「计算 与 世界」彻底分离。
+Delta 与 Transaction 合流
+此时研究出现重要收敛。
+前面：「Delta Network」关注：「变化」
+现在：「Transaction Runtime」也关注：「变化」
+于是发现：
+Transaction 本质上是：「变化集合。」
+例如：「+100 Iron -50 Gold +3 Processor」
+实际上就是：「Delta Bundle」
+这一发现后来极其重要。
+因为：「Delta 与 Transaction」开始融合。
+Rollback
+事务出现后。 自然引出另一个能力。
+Definition-019
+Rollback
+撤销事务。
+例如：
+Transaction
+
+↓
+
+Validation Fail
+此时：「全部放弃。」
+而不会变成：「执行了一半」
+这是传统Minecraft大量逻辑做不到的事情。
+Discovery-010
+Rollback 是 Transaction 的副产品。
+不是额外功能。
+AE2 为什么再次特殊
+研究发现。
+AE2天然适合事务化。
+因为：「Craft Plan」本质上已经接近：「事务。」
+例如：「需要： Iron -100 Gold -20 Processor +10」
+实际上：「就是事务记录。」
+这也是：「AE2-VM」为什么看起来如此顺滑的重要原因之一。
+形成：
+ADR-028
+AE2 Craft Planner 与 Transaction Model 天然兼容。
+Prediction
+事务化之后。 又出现一个新的能力。
+Hypothesis-014
+预测执行。
+注意。
+这里的预测。 已经不同于：「JIT幻想时代」的预测。
+早期预测：「直接预测结果」
+后来被否定。
+现在预测：「预测事务是否能够成功提交」
+例如：「未来库存是否足够」
+这种预测。 风险小得多。
+可验证性也更强。
+Replay 与 Transaction
+此时。 Replay 获得新意义。
+过去： Replay记录：「事件」
+现在： Replay记录：「事务」
+例如：「Tx#1001 Iron -100 Processor +10」
+未来：「重放事务」即可恢复系统行为。
+于是形成：
+Replay
+
+↓
+
+Transaction Log
+
+↓
+
+State Recovery
+完整链路。
+研究第一次接触：「Event Sourcing」与：「Write-Ahead Log」思想。
+Transaction Taxonomy
+随着讨论推进。 事务开始分类。
+Type A
+Inventory Transaction
+修改：「库存」
+Type B
+Craft Transaction
+修改：「合成计划」
+Type C
+Network Transaction
+修改：「网络状态」
+Type D
+World Transaction
+修改：「Block Entity Chunk」
+其中：「World Transaction」被认为：「最困难。」
+世界是否能事务化
+这里首次出现巨大争议。
+支持观点：「所有状态 最终都只是状态。」
+反对观点：「红石 实体AI 物理传播 非常依赖顺序。」
+因此形成：
+Constraint-006
+Transaction Runtime 易于进入库存系统。 难于进入世界系统。
+后来成为：「World IR」路线的重要前提。
+Transaction Runtime 雏形
+到本章结束。 第一次形成：
+Snapshot
+
+↓
+
+Task Graph
+
+↓
+
+Worker
+
+↓
+
+Transaction
+
+↓
+
+Validation
+
+↓
+
+Commit
+的新链路。
+与过去相比。
+世界修改被推迟到了：「Commit」阶段。
+正确性显著增强。
+也为未来：「并行 回滚 预测 重放」打下基础。
+本章总结
+Transaction Runtime 的提出。 标志研究进入：「Consistency Era （一致性时代）」
+此前研究重点：「性能」
+此后研究重点：「状态正确性」
+形成：
+ADR-029
+Transaction 优先于直接修改世界。
+ADR-030
+Rollback 是一等能力。
+ADR-031
+事务本质上是变化集合。
+Law-005
+Transaction Law
+那么它很难安全并行。
+Chapter Conclusion
+“看见什么世界。” Transaction 解决的是： “如何改变世界。”
+通向下一章
+现在已经拥有：「Profiler Replay Delta Snapshot Task Graph Validation Transaction」
+新的问题终于浮现：「这些技术 能否推广到所有 BlockEntity？」还是说：「AE2只是一个特殊幸运案例？」
+Chapter 12
+Domain VM：AE2 是开始，还是例外？
+（待续）
+Volume I · 思想演化史
+Chapter 12
+Domain VM：AE2 是开始，还是例外？
+新问题
+Transaction Runtime 形成之后。 研究已经拥有：
+Profiler
+
+↓
+
+Replay
+
+↓
+
+Benchmark
+
+↓
+
+Delta
+
+↓
+
+Snapshot
+
+↓
+
+Task Graph
+
+↓
+
+Validation
+
+↓
+
+Transaction
+完整技术链。
+此时终于出现一个无法回避的问题。
+AE2 看起来一切顺利。
+那么：「是否意味着 Minecraft可以全面VM化？」
+或者：「AE2只是运气好？」
+这个问题后来成为整套研究体系最重要的分水岭。
+因为回答不同。 会导向完全不同的未来。
+Universal VM 假说
+早期乐观路线认为。
+任何系统：
+BlockEntity
+
+↓
+
+IR
+
+↓
+
+ByteCode
+
+↓
+
+VM
+都可以获得：「并行 缓存 优化」效果。
+于是产生：
+Hypothesis-015
+Universal VM
+即：「整个Minecraft 统一抽象 统一执行器。」
+这是一条极具吸引力的路线。
+也是最危险的路线之一。
+第一次反证
+随着 AE2-VM 被深入分析。 一个事实越来越明显。
+AE2 成功。
+并不是因为：「VM」
+而是因为：「Craft Planner」恰好满足：「快照化 纯计算 无副作用 可验证」
+这四个条件。
+失去任何一个。 系统复杂度都会指数增长。
+于是出现：
+Discovery-011
+VM 不是成功原因。 Domain 才是成功原因。
+即：「领域特征 决定可行性。」
+Domain Thinking
+研究第一次从：「统一架构」转向：「领域架构」
+即： 不是问：「Minecraft如何VM化？」
+而是问：「哪些领域 满足VM条件？」
+于是诞生：
+Definition-020
+Domain VM
+针对特定领域设计的：
+Snapshot
+
+↓
+
+IR
+
+↓
+
+VM
+
+↓
+
+Validation
+体系。
+而不是：「万能VM。」
+第一代领域分类
+随着讨论推进。 开始尝试建立：「VM适配性分类。」
+Domain A
+Craft Planning
+特点：「纯计算 无副作用 输入稳定」
+评价：「★★★★★」
+理想领域。
+AE2 属于这一类。
+Domain B
+Path Search
+特点：「图搜索 复杂度高 副作用低」
+评价：「★★★★☆」
+潜力很大。
+AE2 网络搜索。 物流规划。 都可能属于：「Path Domain」
+Domain C
+Storage Query
+特点：「读多 写少」
+评价：「★★★★☆」
+适合：「Snapshot」
+不一定适合：「全面事务化」
+Domain D
+Inventory Simulation
+特点：「事务模拟 可回滚」
+评价：「★★★★★」
+与：「Transaction Runtime」天然兼容。
+Domain E
+Redstone
+特点：「时序敏感 强反馈 强传播」
+评价：「★☆☆☆☆」
+风险极高。
+研究第一次明确认为：「红石 不应作为早期目标。」
+Domain F
+Hopper
+特点：「状态依赖 顺序敏感」
+评价：「★☆☆☆☆」
+几乎不适合作为：「Domain VM」研究对象。
+Domain G
+Entity AI
+特点：「半状态 半计算」
+评价：「★★★☆☆」
+有潜力。
+需要进一步分类。
+Minecraft Runtime Taxonomy
+此时。 研究终于形成第一版：
+Runtime 分类学
+Type A
+Pure Compute Domain
+例如：「Craft Planner」
+特点：「快照 纯函数 无副作用」
+是最佳研究对象。
+Type B
+Snapshot Domain
+例如：「Storage Query」
+特点：「可快照 弱副作用」
+适合：「Worker」
+Type C
+Transaction Domain
+例如：「Inventory Simulation」
+特点：「变化可表达」
+适合：「Transaction Runtime」
+Type D
+Ownership Domain
+例如：「Folia Region」
+特点：「状态必须有所有者」
+更适合：「区域运行时」
+而不是：「VM」
+Type E
+Temporal Domain
+例如：「Redstone Tick Chain」
+特点：「顺序决定结果」
+最难处理。
+AE2 成为样板
+到这里。 AE2 的角色再次变化。
+最开始：「优化目标」
+后来：「实验平台」
+现在：「参考样板。」
+因为它成为第一个实证案例。 证明：「不是所有Minecraft逻辑都一样。」
+存在：「天然适合VM的领域。」
+这件事的重要性远超：「AE2快了多少。」
+Domain Adapter
+此时提出新的架构理念。
+不要做：「Universal VM」
+而做：「Domain Adapter」
+即：「AE2 Adapter RS Adapter Create Adapter GT Adapter」
+每个领域：「独立验证。」
+逐步接入：「Runtime。」
+形成：
+ADR-032
+Adapter 优先于 Universal VM。
+这是整个路线的重要收缩。
+也是工程可行性第一次大幅提升。
+第二条核心定律
+经过长期讨论。 形成：
+Law-006
+Domain Law
+只有适用于特定领域的优化模型。
+这是全书最重要的定律之一。
+因为它直接否定：「万能解。」
+并拥抱：「领域解。」
+本章总结
+本章结束后。 研究思维发生根本变化。
+过去：「寻找一个伟大的Runtime。」
+现在：「寻找许多可验证领域。」
+形成：
+ADR-033
+AE2 是领域成功案例。 不是普适规律。
+ADR-034
+Domain VM 是现实路线。
+ADR-035
+Universal VM 属于长期研究课题。
+Chapter Conclusion
+先找到第一个真正适合被拯救的领域。
+通向下一章
+此时。 终于出现一个新的外部样本。
+研究者开始意识到。 世界上已经存在一个：「真正运行中的 Minecraft多线程实验。」
+它的名字叫：「Folia」
+Chapter 13
+Folia：线程分离，还是状态所有权分离？
+（待续）
+Volume I · 思想演化史
+Chapter 13
+Folia：线程分离，还是状态所有权分离？
+一个重要转折
+到目前为止。 研究主要围绕：「AE2 Snapshot Task Graph Transaction」展开。
+但此时。 出现了一个无法忽视的事实。
+世界上已经存在一个：「真正尝试多线程Minecraft Tick」的项目。
+它叫：「Folia」
+于是研究第一次面对一个现实问题。
+Question-013
+如果：「Folia 已经在运行。」
+那么：「它到底解决了什么问题？」
+以及：「它解决问题的方式 是否适用于本研究路线？」
+第一层误解
+最初。 许多人看到 Folia。 第一反应是：
+「Minecraft终于多线程了。」
+然后进一步联想：
+开更多线程
+
+↓
+
+更快
+这种理解。 后来被证明是不完整的。
+因为研究发现。
+Folia 最核心的创新。 并不是：「线程。」
+而是：「所有权。」
+Ownership Crisis
+此前研究已经多次碰到一个问题。
+Constraint-007
+共享状态危机。
+例如：「线程A 修改库存」
+同时：「线程B 读取库存」
+结果：「锁竞争 死锁 幽灵BUG」
+不断出现。
+而 Folia 采取了一种完全不同的方向。
+它首先回答：「这个状态属于谁？」
+而不是：「这个状态在哪个线程？」
+这成为整个章节最重要的发现之一。
+State Ownership
+于是形成：
+Definition-021
+State Ownership
+任何状态。 必须拥有唯一所有者。
+例如：「Chunk A」属于：「Region A」
+「Chunk B」属于：「Region B」
+并且：「只能由所有者修改。」
+不是：「所有线程都能改。」
+研究第一次发现。
+这与：「AE2 Snapshot」思路并不冲突。
+反而高度一致。
+因为：「Snapshot 也是一种状态隔离。」
+只是：「实现方式不同。」
+Ownership vs Snapshot
+于是形成第一个比较模型。
+Snapshot Runtime
+思路：
+复制状态
+
+↓
+
+Worker计算
+
+↓
+
+Commit
+关注：「复制」
+Ownership Runtime
+思路：
+状态属于唯一线程
+
+↓
+
+其他线程不能改
+关注：「所有权。」
+这是两条不同路线。
+但目标一致：「消除共享写入。」
+Cross Region Problem
+然而。 新的问题立刻出现。
+例如：「Region A」拥有：「Chunk A」
+而：「Region B」拥有：「Chunk B」
+现在：「A 需要影响 B」
+怎么办？
+这是共享状态被消灭后。 必然出现的问题。
+Message Passing
+Folia 给出的答案。 逐渐被研究概括为：
+Definition-022
+Message Passing
+不要：「直接修改别人状态。」
+而是：「发送消息。」
+即：
+错误方式：
+Region A
+
+↓
+
+修改 Region B
+正确方式：
+Region A
+
+↓
+
+Message
+
+↓
+
+Region B
+
+↓
+
+自行处理
+研究者突然发现。
+这与：「Actor Model」非常接近。
+第一次出现：「Ownership Runtime」概念。
+Folia 的真正价值
+随着深入分析。 研究逐渐形成共识。
+很多人以为：
+Folia成功
+
+↓
+
+因为线程池。
+实际上：
+Folia成功
+
+↓
+
+因为状态边界。
+于是形成：
+Discovery-012
+状态边界比线程设计更重要。
+这与前面的：「Snapshot Runtime Transaction Runtime」产生强烈共鸣。
+因为三条路线都在说同一件事：
+「先解决状态问题 再解决线程问题。」
+Folia 与 AE2
+此时。 研究出现一个有趣问题。
+AE2：「是否适合Ownership？」
+答案：「部分适合。」
+例如：「Grid」可以拥有：「自己的所有权。」
+但：「Craft Planner」显然更适合：「Snapshot Runtime。」
+第一次发现：
+不同系统。
+可能适合：「不同Runtime。」
+而不是：「统一Runtime。」
+第二次路线收缩
+此前。 研究还隐隐约约希望：「一个Runtime 解决全部问题。」
+Folia 案例研究后。 这种想法开始瓦解。
+形成：
+Rule-013
+不要寻找唯一Runtime。 要寻找正确Runtime。
+因为：「Craft Planner 适合Snapshot。」
+「Inventory 适合Transaction。」
+「Region 适合Ownership。」
+三者完全不同。
+Runtime Family
+此时。 研究第一次形成：
+Runtime Family
+概念。
+未来可能存在：
+Runtime A
+Snapshot Runtime
+负责：「Pure Compute」
+Runtime B
+Transaction Runtime
+负责：「Inventory Craft」
+Runtime C
+Ownership Runtime
+负责：「World Chunk Region」
+第一次出现：「多运行时协同。」
+而不是：「唯一运行时。」
+第三条核心定律
+经过长期讨论。 形成：
+Law-007
+Ownership Law
+那么最终一定会回到锁。
+这是全书核心定律之一。
+因为：「共享状态 最终会产生同步开销。」
+而：「Ownership 提供另一种解决方案。」
+本章总结
+Folia 的出现。 标志研究进入：「Ownership Era」
+此前。 重点是：「复制状态。」
+此后。 新增思路：「分离状态所有权。」
+形成：
+ADR-036
+Folia 不是线程池方案。
+ADR-037
+Folia 本质是 Ownership Runtime。
+ADR-038
+Ownership 与 Snapshot 并不冲突。
+ADR-039
+Runtime 可以同时存在多种形态。
+Chapter Conclusion
+“线程属于状态。” Folia 反过来说： “状态属于线程。”
+通向下一章
+现在研究已经拥有：「Snapshot Runtime Transaction Runtime Ownership Runtime」
+一个新的问题诞生：「这些Runtime 能否被统一描述？」
+换句话说：「Minecraft中 是否存在一种更底层的表达形式？」
+Chapter 14
+World IR：如果世界是一门语言
+（待续）
+Volume I · 思想演化史
+Chapter 14
+World IR：如果世界是一门语言
+新问题
+经过长时间演化。 研究已经拥有三条独立路线。
+「Snapshot Runtime」负责：「Pure Compute」
+「Transaction Runtime」负责：「State Change」
+「Ownership Runtime」负责：「World Authority」
+此时产生了一个全新的问题。
+如果：「这些Runtime 都成立。」
+那么：「它们在底层 究竟在处理什么？」
+换句话说。
+Snapshot。 在复制什么？
+Transaction。 在修改什么？
+Ownership。 在保护什么？
+研究最终指向：「世界行为本身。」
+从代码到行为
+此前所有讨论。 都隐含着一个默认前提：
+Minecraft
+
+=
+
+Java代码
+例如：
+world.setBlock(...)
+inventory.extract(...)
+storage.insert(...)
+系统看见的是：「函数」
+但研究开始意识到。
+真正重要的。 从来不是：「函数名字。」
+而是：「行为。」
+例如：
+world.setBlock(...)
+可能来自：
+「红石 漏斗 机器 玩家」
+但它们本质上都在做：「修改方块。」
+第一次出现：
+Discovery-013
+世界行为比实现代码更重要。
+中间表示的启发
+此时研究开始借鉴：「编译器」思想。
+例如：
+C++
+
+↓
+
+LLVM IR
+
+↓
+
+Machine Code
+编译器不会直接处理：「高级语言。」
+而是处理：「中间表示」
+于是产生：
+Hypothesis-016
+Minecraft 是否也需要：「World IR」？
+即：「世界中间表示。」
+不是：「Java对象」
+而是：「世界行为。」
+World IR 的第一次定义
+形成：
+Definition-023
+World IR
+对世界行为的统一表达。
+而不是：「实现细节。」
+例如：
+原始代码：
+inventory.extract(iron,100)
+World IR：「EXTRACT_ITEM Item: Iron Count: 100」
+原始代码：
+world.setBlock(pos,state)
+World IR：「SET_BLOCK Position: X,Y,Z State: ...」
+第一次出现：
+世界行为
+
+↓
+
+统一表达。
+Primitive Operations
+研究继续推进。
+试图寻找：「世界不可再分解行为。」
+形成第一版：
+IR-001
+READ
+读取某种状态。
+例如：「READ_BLOCK READ_ENTITY READ_ITEM」
+IR-002
+WRITE
+修改状态。
+例如：「WRITE_BLOCK WRITE_ENTITY」
+IR-003
+TRANSFER
+资源变化。
+例如：「TRANSFER_ITEM TRANSFER_ENERGY TRANSFER_FLUID」
+IR-004
+NOTIFY
+状态传播。
+例如：「REDSTONE_NOTIFY NETWORK_NOTIFY」
+IR-005
+CREATE
+创建对象。
+例如：「SPAWN_ENTITY」
+IR-006
+DESTROY
+销毁对象。
+例如：「REMOVE_BLOCK」
+第一次形成：「世界原语。」
+为什么需要 World IR
+此时研究开始回答一个重要问题。
+为什么：「Runtime越来越复杂？」
+原因：「系统看见的是代码。」
+代码：「千差万别。」
+而行为：「高度重复。」
+例如：「AE2 RS GT Create」
+实现不同。
+但最终都存在：「TRANSFER」行为。
+第一次发现：
+Discovery-014
+行为的种类远少于系统的种类。
+因此：「统一行为 远比统一Mod容易。」
+Task Graph 与 World IR 合流
+此前。 Task Graph 已出现。
+但来源是：「任务。」
+现在。 出现新的可能。
+World IR
+
+↓
+
+Task Graph
+例如：
+READ
+
+↓
+
+COMPUTE
+
+↓
+
+TRANSFER
+
+↓
+
+NOTIFY
+天然形成：「依赖图。」
+于是：
+Hypothesis-017
+Task Graph 可能是 World IR 的执行形式。
+而不是：「另一套系统。」
+Transaction 与 World IR
+研究继续推进。
+发现：「Transaction」其实也能表达成：「World IR。」
+例如： 事务：「Iron -100 Gold +20」
+转换：「TRANSFER_ITEM」
+于是：
+Transaction
+
+↓
+
+IR
+
+↓
+
+Scheduler
+
+↓
+
+Commit
+第一批理论开始融合。
+Domain VM 再次出现
+此时。 研究突然发现。
+Domain VM 实际上也缺东西。
+因为：「Craft VM Path VM Storage VM」
+之间缺乏统一语言。
+而：「World IR」恰好可能成为：「共同语言。」
+形成：
+Discovery-015
+World IR 可能是 Runtime 家族之间的桥梁。
+最激进的设想
+随着讨论推进。 出现一个疯狂但完整的想法。
+未来Minecraft：
+不再：
+Tick
+
+↓
+
+Java对象
+而是：
+World Snapshot
+
+↓
+
+World IR
+
+↓
+
+Task Graph
+
+↓
+
+Scheduler
+
+↓
+
+Worker
+
+↓
+
+Transaction
+
+↓
+
+Commit
+形成真正意义上的：「World Runtime」
+此时。 研究第一次脱离：「AE2优化」范畴。
+进入：「下一代Minecraft运行时」范畴。
+关键风险
+当然。 此时仍然存在大量问题。
+Risk-002
+IR膨胀
+如果：「IR种类太多」
+则失去意义。
+Risk-003
+Temporal State
+例如：「红石」是否能表达为：「IR」仍未知。
+Risk-004
+兼容性
+大量Mod：「直接访问World。」
+无法自动转化。
+因此。
+World IR 被归类为：「Long-Term Research」而非：「Near-Term Goal」
+第四条核心定律
+经过长期讨论。 形成：
+Law-008
+Behavior Law
+世界的规律来自行为。
+这是 World IR 的理论基础。
+本章总结
+World IR 的提出。 意味着研究进入：「Abstraction Era （抽象时代）」
+此前：「研究系统。」
+此后：「研究行为。」
+形成：
+ADR-040
+行为优于实现。
+ADR-041
+Task Graph 可视为 IR 执行形式。
+ADR-042
+World IR 是 Runtime 家族共同语言候选。
+Chapter Conclusion
+Transaction 改变世界。 Ownership 保护世界。 那么 World IR 负责描述世界。
+通向下一章
+现在研究已经拥有：「Profiler Replay Benchmark Delta Snapshot Task Graph Validation Transaction Ownership World IR」
+最后一个问题终于出现：「这一切 能否结合成统一的运行时体系？」
+Chapter 15
+Unified Runtime：Minecraft 是否需要自己的“操作系统”
+（待续）
+Volume I · 思想演化史
+Chapter 15
+Unified Runtime：Minecraft 是否需要自己的“操作系统”
+最终问题
+经过前十四章。 研究已经逐渐形成一棵庞大的技术树。
+从：「JIT」开始。
+经过：
+Snapshot
+
+↓
+
+Profiler
+
+↓
+
+Replay
+
+↓
+
+Benchmark
+
+↓
+
+Delta
+
+↓
+
+Task Graph
+
+↓
+
+Validation
+
+↓
+
+Transaction
+
+↓
+
+Ownership
+
+↓
+
+World IR
+最终来到一个几乎无法回避的问题。
+如果：「这些系统都成立。」
+那么：「它们之间是什么关系？」
+或者换一种说法。
+我们究竟是在：「优化AE2？」
+还是在：「重新设计Minecraft Runtime？」
+这是全书至今最宏大的问题。
+Runtime Fragmentation
+研究首先发现一个现象。
+Minecraft大型科技模组。 虽然表现不同。
+其内部结构却惊人相似。
+例如：
+AE2
+「Grid Node Storage Pattern Craft」
+Refined Storage
+「Network Disk Craft」
+GregTech
+「Energy Machine Pipe」
+Create
+「Kinetic Network Machine Logistics」
+实现不同。
+但都有：「状态 网络 传播 资源流动」
+这一发现极其重要。
+Discovery-016
+大型科技模组 反复解决相同问题。
+只是使用不同实现。
+Network Theory
+于是产生新的思考。
+是否能够抽象：「共同结构？」
+形成：
+Definition-024
+Unified Network Model
+任何网络系统。 均表达为：
+「Node Edge State Event」
+其中：「Node」表示：「机器 终端 容器 设备」
+「Edge」表示：「连接关系」
+「State」表示：「库存 能量 流体 气体」
+「Event」表示：「变化」
+第一次出现：「统一网络理论。」
+Runtime Family 合流
+此前。 已经形成：
+「Snapshot Runtime」
+「Transaction Runtime」
+「Ownership Runtime」
+「Task Runtime」
+最初看起来毫无关系。
+后来逐渐发现：
+它们其实都在回答：「谁读取状态？ 谁计算状态？ 谁修改状态？」
+只是答案不同。
+于是形成：
+Discovery-017
+Runtime 的本质是：「状态管理策略。」
+而不是：「线程管理策略。」
+Minecraft 操作系统假说
+随着讨论推进。 出现一个非常大胆的设想。
+Hypothesis-018
+Minecraft 需要自己的：「Runtime OS」
+不是：「Windows Linux」意义上的操作系统。
+而是：「Minecraft Runtime Layer」
+负责：「Task Snapshot Transaction Ownership Scheduling」的统一管理。
+此时出现新模型。
+Minecraft World
+
+↓
+
+Runtime
+
+↓
+
+Worker
+
+↓
+
+Commit
+而不是：
+World
+
+↓
+
+Tick
+
+↓
+
+Everything
+Runtime Kernel
+如果把这个想法继续推进。
+研究会自然得到：
+Definition-025
+Runtime Kernel
+核心职责：
+「Snapshot Creation」
+「Task Scheduling」
+「Transaction Validation」
+「State Ownership」
+「Commit」
+第一次出现类似：「内核」的概念。
+Runtime Services
+随后。 大型模组不再自己实现：
+「Path Search」
+「Storage Query」
+「Task Queue」
+而是调用：「Runtime Service」
+例如：
+「Craft Service」
+「Graph Service」
+「Transaction Service」
+第一次形成：「Runtime Ecosystem」概念。
+为什么这条路线重要
+此前。 很多优化路线都有一个问题。
+即：「只能优化一个Mod。」
+例如：「AE2优化」只能提升：「AE2。」
+但。
+如果未来存在：「Unified Runtime」
+那么：「AE2 RS GT Create」
+可能同时受益。
+研究第一次开始脱离：「单个Mod。」
+进入：「生态级优化。」
+最大风险
+当然。 Unified Runtime 同样拥有巨大风险。
+Risk-005
+过度抽象。
+如果：「抽象过多」
+则：「适配困难。」
+Risk-006
+兼容性问题。
+Minecraft大量模组：「直接调用World。」
+很难自动迁移。
+Risk-007
+Runtime复杂度爆炸。
+最终可能变成：「Runtime 比游戏还复杂。」
+因此： Unified Runtime 被归类为：「Far Future Research」
+而不是：「近期目标。」
+所有路线的第一次汇合
+到本章末尾。 所有技术树首次汇聚。
+Profiler
+
+↓
+
+Replay
+
+↓
+
+Benchmark
+
+↓
+
+Delta
+
+↓
+
+Snapshot
+
+↓
+
+Task Graph
+
+↓
+
+Validation
+
+↓
+
+Transaction
+
+↓
+
+Ownership
+
+↓
+
+World IR
+
+↓
+
+Unified Runtime
+第一次形成：「完整研究地图。」
+第五条核心定律
+经过长期讨论。 形成：
+Law-009
+Runtime Law
+VM不是系统。 Transaction不是系统。 Snapshot不是系统。 真正的系统是这些规则共同构成的 Runtime。
+这是目前整本书最顶层的定律。
+本章总结
+Unified Runtime 的提出。 标志研究进入：「Synthesis Era （综合时代）」
+此前：「研究单个问题。」
+此后：「研究问题之间的关系。」
+形成：
+ADR-043
+Runtime 是状态管理系统。
+ADR-044
+统一行为比统一代码更现实。
+ADR-045
+生态优化优先于单Mod优化。
+Chapter Conclusion
+“如何优化AE2？” 而是： “为什么AE2、RS、GT、Create都在重复发明同一种轮子？”
+Volume I 完
+本卷终章
+从：「JIT幻想」开始。
+到：「Unified Runtime」结束。
+研究经历了九次重大转向：
+JIT
+
+↓
+
+状态
+
+↓
+
+副作用
+
+↓
+
+Profiler
+
+↓
+
+Replay
+
+↓
+
+Delta
+
+↓
+
+Snapshot
+
+↓
+
+Transaction
+
+↓
+
+Ownership
+
+↓
+
+World IR
+
+↓
+
+Unified Runtime
+最终形成一句贯穿全书的核心命题：
+Minecraft 的问题是状态太多。

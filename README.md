@@ -1,4 +1,6 @@
-# MC Thread
+# 线程撕裂者
+
+英文名 **Thread Tearer**（modId 仍为 `mcthread`，命令仍为 `/mcthread`）。
 
 把 Minecraft 服务器主线程上**可以并行的计算**卸到多核，把**必须串行的世界状态**留在主线程。目标不是“再开一条游戏线程”，而是在不改写第三方模组源码的前提下，让大量独立的方块实体 Tick 真正吃满 CPU。
 
@@ -6,14 +8,15 @@
 
 | 分支 | 工程目录 | 游戏版本 | 加载器 | 说明 |
 | --- | --- | --- | --- | --- |
-| [`1.20.1-forge`](https://github.com/TaoLe-si/MC-Thread/tree/1.20.1-forge) | [`1.20.1-forge/`](1.20.1-forge/) | 1.20.1 | Forge / NeoForge 47.x | 当前实现 |
+| [`1.20.1-forge`](https://github.com/TaoLe-si/MC-Thread/tree/1.20.1-forge) | [`1.20.1-forge/`](1.20.1-forge/) | 1.20.1 | Forge / NeoForge 47.x | 稳定线 |
+| [`1.21.1-neoforge`](https://github.com/TaoLe-si/MC-Thread/tree/1.21.1-neoforge) | [`1.21.1-neoforge/`](1.21.1-neoforge/) | 1.21.1 | NeoForge 21.1 | 本分支 |
 
 克隆后请检出对应分支，并在对应目录里构建：
 
 ```powershell
 git clone https://github.com/TaoLe-si/MC-Thread.git
-git checkout 1.20.1-forge
-cd 1.20.1-forge
+git checkout 1.21.1-neoforge
+cd 1.21.1-neoforge
 .\gradlew.bat build
 ```
 
@@ -39,7 +42,7 @@ Tick 预算是 **50 ms（20 TPS）**。模组一多，这条线程会先于 CPU 
 3. **事件总线是同步收集结果的。** `EventBus.post` 的监听器可能改变事件结果；调用方必须等它结束。不能把 `post` 偷到别的线程再“稍后应用”。
 4. **Amdahl 定律。** 即使无限核，也只能加速“可并行的那一段”。区块加载、实体 AI、AE2 电网、玩家移动仍然串行。多核优化的上限 = 方块实体计算占 tick 的比例。
 
-因此 MC Thread 的答案是：**识别三类工作，分别放到三条执行路径上。**
+因此 线程撕裂者 的答案是：**识别三类工作，分别放到三条执行路径上。**
 
 ---
 
@@ -111,7 +114,7 @@ steal(use/place)
 
 ## 4. 方块实体 Tick：多核真正干活的地方
 
-原版每个维度在主线程遍历 `LevelChunk.BoundTickingBlockEntity`，依次调用 `tick()`。MC Thread 在这个入口注入：
+原版每个维度在主线程遍历 `LevelChunk.BoundTickingBlockEntity`，依次调用 `tick()`。线程撕裂者 在这个入口注入：
 
 ```java
 // BoundTickingBlockEntityMixin
@@ -291,13 +294,13 @@ MCThread.Monitor tick=... computeTicks=800 computeActive=2 computeLive=15 comput
 
 | 项 | 值 |
 | --- | --- |
-| 名称 | MC Thread（modId `mcthread`） |
-| 本分支 | `1.20.1-forge` |
-| 工程目录 | `1.20.1-forge/` |
-| 平台 | NeoForge 1.20.1 / Forge 47.1.3+（loader id `forge`） |
-| 构建 | ModDevGradle Legacy `2.0.91` |
-| 构件 | `net.minecraftforge:forge:1.20.1-47.1.3` |
-| 编译 JDK | 17（工具链另需 JDK 21） |
+| 名称 | 线程撕裂者 / Thread Tearer（modId `mcthread`） |
+| 本分支 | `1.21.1-neoforge` |
+| 工程目录 | `1.21.1-neoforge/` |
+| 平台 | NeoForge 1.21.1（`neo_version` 21.1.250） |
+| 构建 | ModDevGradle `2.0.147` |
+| 构件 | `net.neoforged:neoforge:21.1.250` |
+| 编译 JDK | 21 |
 | Gradle | Wrapper 8.14.5 |
 | 映射 | Mojang + Parchment 2023.09.03 |
 | 许可证 | All Rights Reserved（见 `mods.toml`） |
@@ -320,7 +323,7 @@ MCThread.Monitor tick=... computeTicks=800 computeActive=2 computeLive=15 comput
 
 ### 构建与安装
 
-在 **`1.20.1-forge/`** 目录：
+在 **`1.21.1-neoforge/`** 目录（需要 JDK 21）：
 
 ```powershell
 .\gradlew.bat build
@@ -331,14 +334,14 @@ MCThread.Monitor tick=... computeTicks=800 computeActive=2 computeLive=15 comput
 .\gradlew.bat copyToMods -PmodsDir="D:\...\mods"
 ```
 
-产物：`1.20.1-forge/build/libs/mcthread-0.1.0.jar`。完整安装步骤见 [安装与使用](1.20.1-forge/docs/04-install-and-usage.md)。
+产物：`1.21.1-neoforge/build/libs/mcthread-0.1.0.jar`。完整安装步骤见 [安装与使用](1.21.1-neoforge/docs/04-install-and-usage.md)。
 
 修改后必须 **完整重启** 游戏（热替换 Mixin 无效）。
 
 ### 本版本源码结构
 
 ```text
-1.20.1-forge/src/main/java/com/taolesi/mcthread/
+1.21.1-neoforge/src/main/java/com/taolesi/mcthread/
 ├── MCThread.java              # @Mod 入口，注册命令与监视器
 ├── api/                       # 公共 API（无 Minecraft 依赖）
 ├── runtime/                   # ComputePool、InteractionExecutor、乐观工作流
@@ -362,10 +365,10 @@ MCThread.Monitor tick=... computeTicks=800 computeActive=2 computeLive=15 comput
 
 | 文档 | 内容 |
 | --- | --- |
-| [01 可行性分析](1.20.1-forge/docs/01-feasibility-analysis.md) | 方案论证与 Amdahl 上限 |
-| [02 开发计划](1.20.1-forge/docs/02-development-plan.md) | 里程碑 |
-| [03 测试方案](1.20.1-forge/docs/03-testing-plan.md) | 分层测试与 A/B 门槛 |
-| [04 安装与使用](1.20.1-forge/docs/04-install-and-usage.md) | 客户端/服务端安装 |
-| [05 交互卸载实验](1.20.1-forge/docs/05-interaction-offload-experiment.md) | 早期实验笔记 |
-| [协同开发](1.20.1-forge/CONTRIBUTING.md) | 线程纪律、Mixin 规则、提交规范 |
-| [变更记录](1.20.1-forge/CHANGELOG.md) | 版本历史 |
+| [01 可行性分析](1.21.1-neoforge/docs/01-feasibility-analysis.md) | 方案论证与 Amdahl 上限 |
+| [02 开发计划](1.21.1-neoforge/docs/02-development-plan.md) | 里程碑 |
+| [03 测试方案](1.21.1-neoforge/docs/03-testing-plan.md) | 分层测试与 A/B 门槛 |
+| [04 安装与使用](1.21.1-neoforge/docs/04-install-and-usage.md) | 客户端/服务端安装 |
+| [05 交互卸载实验](1.21.1-neoforge/docs/05-interaction-offload-experiment.md) | 早期实验笔记 |
+| [协同开发](1.21.1-neoforge/CONTRIBUTING.md) | 线程纪律、Mixin 规则、提交规范 |
+| [变更记录](1.21.1-neoforge/CHANGELOG.md) | 版本历史 |
