@@ -1,22 +1,24 @@
 # 线程撕裂者
 
-英文名 **Thread Tearer**（modId 仍为 `mcthread`，命令仍为 `/mcthread`）。
+英文名 **Thread Tearer**（modId `threadtearer`，命令 `/threadtearer`）。
 
 把 Minecraft 服务器主线程上**可以并行的计算**卸到多核，把**必须串行的世界状态**留在主线程。目标不是“再开一条游戏线程”，而是在不改写第三方模组源码的前提下，让大量独立的方块实体 Tick 真正吃满 CPU。
 
-当前仓库按 **Minecraft 版本 + 加载器** 拆分：
+当前仓库按 **Minecraft 版本 + 加载器 + 交付物** 拆分：核心 mod 与各第三方模组的附属 mod 各占一个分支，互不夹带。
 
 | 分支 | 工程目录 | 游戏版本 | 加载器 | 说明 |
 | --- | --- | --- | --- | --- |
 | [`1.20.1-forge`](https://github.com/TaoLe-si/MC-Thread/tree/1.20.1-forge) | [`1.20.1-forge/`](1.20.1-forge/) | 1.20.1 | Forge / NeoForge 47.x | 稳定线 |
-| [`1.21.1-neoforge`](https://github.com/TaoLe-si/MC-Thread/tree/1.21.1-neoforge) | [`1.21.1-neoforge/`](1.21.1-neoforge/) | 1.21.1 | NeoForge 21.1 | 本分支 |
+| [`1.21.1-neoforge-core`](https://github.com/TaoLe-si/MC-Thread/tree/1.21.1-neoforge-core) | [`1.21.1-neoforge-core/`](1.21.1-neoforge-core/) | 1.21.1 | NeoForge 21.1 | 核心：API、计算池、交互卸载 |
+| [`1.21.1-neoforge-mek-addon`](https://github.com/TaoLe-si/MC-Thread/tree/1.21.1-neoforge-mek-addon) | [`1.21.1-neoforge-mek-addon/`](1.21.1-neoforge-mek-addon/) | 1.21.1 | NeoForge 21.1 | 附属：Mekanism |
+| [`1.21.1-neoforge-if`](https://github.com/TaoLe-si/MC-Thread/tree/1.21.1-neoforge-if) | [`1.21.1-neoforge-if/`](1.21.1-neoforge-if/) | 1.21.1 | NeoForge 21.1 | 附属：Industrial Foregoing（本分支） |
 
-克隆后请检出对应分支，并在对应目录里构建：
+附属分支只含该附属自己的工程，核心以 mavenLocal 依赖引入，需先在核心分支构建并 `publishToMavenLocal`。克隆后请检出对应分支，并在对应目录里构建：
 
 ```powershell
 git clone https://github.com/TaoLe-si/MC-Thread.git
-git checkout 1.21.1-neoforge
-cd 1.21.1-neoforge
+git checkout 1.21.1-neoforge-if
+cd 1.21.1-neoforge-if
 .\gradlew.bat build
 ```
 
@@ -189,6 +191,36 @@ AE2 及其附属（ExtendedAE、无线连接器、ME 舱口/总线/样板/库存
 
 主线程 apply 期间如果再遇到 `setBlock`，**不再转发**（`isWorldWrite` 在 owner apply 上保持内联），避免把一次放置拆成无序的异步块。
 
+### 5.1 把一个 tick 拆成两半：延迟写
+
+上面的转发是**被动**的——worker 跑到某个世界调用，框架把它挑出来送走。但有些模组的 tick 是"一半纯计算、一半世界交互"粘在一个方法里的，`steal` 只能整段搬或整段留。
+
+Mekanism 就是典型。`TileEntityConfigurableMachine.onUpdateServer` 的字节码只有两条语句：
+
+```text
+invokespecial TileEntityMekanism.onUpdateServer()Z   // 配方 / 能量 / 槽位 —— 昂贵且只碰自己
+invokevirtual TileComponentEjector.tickServer()V     // 建 BlockCapabilityCache 推入邻居 —— 必须主线程
+```
+
+框架为此提供**主动**原语 `MCTRuntime.deferWorldWrite(Runnable)`：worker 算完这一半，把另一半交给主线程的**每 tick 批量队列**（`WriteCoalescer`），然后立刻返回继续干自己的活。附属 mod 用 `@WrapOperation` 包住那个调用点即可，不需要在附属里写任何 `Level` 的世界交互 mixin。
+
+```java
+// 附属的 tick 拆分：worker 上延迟，主线程上原样
+if (!InteractionRelocator.isComputing()) { original.call(ejector); return; }
+MCT.runtime().deferWorldWrite(
+        () -> InteractionRelocator.runLockedBlockEntityTick(be, () -> original.call(ejector)));
+```
+
+三个性质：
+
+- **主线程不等待计算。** 计算线程算完主动通知，主线程只在 tick 边界批量 drain 一次。满基地 200 台机器喷出 = 主线程**一个任务**，不是 200 个。
+- **不重叠。** 延迟的那半重新进入 ticker 持有的同一把 per-BE 锁，所以不会与下一 tick 的配方计算同时读写同一批槽位。主线程在这里的等待记在 `phases[...] lockwait=`，是这套设计唯一新增的停顿来源，必须盯着。
+- **晚一 tick。** 对"把当下槽位里的东西推出去"这类语义不可见（物品喷出本来就是 10 tick 一次，且推的是当下状态不是差值）。
+
+与 `scheduleWorldInteraction` 的分工：需要与玩家交互**排定先后**的写走交互 FIFO；只要求"尽快发生"的写走 `deferWorldWrite`。
+
+**附属的搬迁白名单必须与"`@WrapOperation` 包住了什么"绑在一起。** 只有继承 `TileEntityConfigurableMachine` 的类，其 tick 里唯一伸手进世界的那句才确定是被包住的那句；发电机族、激光族、多方块族自己的 tick 体里就建 `BlockCapabilityCache` 并 emit，不属于这个形状，必须留在主线程。`threadtearer-mek` 的 `MekOffloadPolicy` 就是按这条**形状规则**判定的（链上必须出现 `TileEntityConfigurableMachine`），而不是维护一份"哪些类危险"的清单——清单追不上模组更新，形状规则默认安全。
+
 ---
 
 ## 6. `isSameThread` 伪装（以及为什么 `execute` 仍回主线程）
@@ -242,6 +274,7 @@ P         实际并行度，上限 min(独立 BE 数, computeMax)
 2. **可并行 BE 太少。** 8 台机器无法喂饱 15 个 worker；`computeActive` 在 tick 结束采样时经常是 0～3，因为 burst 已经跑完。
 3. **setBlock / 邻居更新风暴。** 计算很快结束，交互 FIFO 和主线程被更新顺序堵住。
 4. **单 BE 超频。** 同一机器的多次 tick 被锁串行，不会线性加速。
+5. **tick 里粘着世界交互。** 若一个 tick 的昂贵部分和"必须主线程"的部分写死在同一个方法里，只能整段留主线程，卸载收益归零。这正是 Mekanism 的情况，解法见 5.1（`deferWorldWrite` 拆分）。
 
 判断卸载是否在工作，看 `logs/latest.log`：
 
@@ -270,6 +303,8 @@ MCThread.Monitor tick=... computeTicks=800 computeActive=2 computeLive=15 comput
 
 - `submitCompute`：纯计算任务进 `ComputePool`
 - `scheduleInteraction`：可延后工作进交互 FIFO
+- `scheduleWorldInteraction`：卸载中的 tick 把世界写交回交互 FIFO（与玩家交互排定先后）
+- `deferWorldWrite`：卸载中的 tick 把世界写交给**每 tick 批量队列**（只要尽快发生、不需排定顺序）——见 5.1
 - `snapshot` / `beginTransaction` / `optimistic`：快照 → 计算 → 校验 → 主线程提交（主线程禁止 join Future）
 
 这套 API 给**主动适配**的模组用。对未适配的模组，靠第 3～4 节的 Mixin 卸载。
@@ -294,9 +329,9 @@ MCThread.Monitor tick=... computeTicks=800 computeActive=2 computeLive=15 comput
 
 | 项 | 值 |
 | --- | --- |
-| 名称 | 线程撕裂者 / Thread Tearer（modId `mcthread`） |
-| 本分支 | `1.21.1-neoforge` |
-| 工程目录 | `1.21.1-neoforge/` |
+| 名称 | 线程撕裂者 / Thread Tearer（modId `threadtearer`） |
+| 核心分支 | `1.21.1-neoforge-core`（工程目录 `1.21.1-neoforge-core/`） |
+| 本分支 | `1.21.1-neoforge-if`（工程目录 `1.21.1-neoforge-if/`，附属 mod `threadtearer_if`） |
 | 平台 | NeoForge 1.21.1（`neo_version` 21.1.250） |
 | 构建 | ModDevGradle `2.0.147` |
 | 构件 | `net.neoforged:neoforge:21.1.250` |
@@ -307,7 +342,7 @@ MCThread.Monitor tick=... computeTicks=800 computeActive=2 computeLive=15 comput
 
 同一 jar 可运行于 NeoForge 47.1.x 与 Forge 47.1.3+。Mixin 只打在两套加载器共有的通用类上。
 
-### 配置（`config/mcthread-common.toml`，热重载）
+### 配置（`config/threadtearer-common.toml`，热重载）
 
 | 配置 | 默认 | 说明 |
 | --- | --- | --- |
@@ -323,41 +358,51 @@ MCThread.Monitor tick=... computeTicks=800 computeActive=2 computeLive=15 comput
 
 ### 构建与安装
 
-在 **`1.21.1-neoforge/`** 目录（需要 JDK 21）：
+本附属的构建需要核心先发布到 mavenLocal：在 `1.21.1-neoforge-core/` 里执行一次 `.\gradlew.bat publishToMavenLocal`，然后回到 **`1.21.1-neoforge-if/`**（需要 JDK 21）：
 
 ```powershell
 .\gradlew.bat build
 .\gradlew.bat test
 .\gradlew.bat runClient
 .\gradlew.bat runServer
-.\gradlew.bat runGameTestServer
 .\gradlew.bat copyToMods -PmodsDir="D:\...\mods"
 ```
 
-产物：`1.21.1-neoforge/build/libs/mcthread-0.1.0.jar`。完整安装步骤见 [安装与使用](1.21.1-neoforge/docs/04-install-and-usage.md)。
+`build` 会先跑两道闸门：`verifyMixins`（mixin 包卫生）与 `verifyMixinTargets`（用真 Titanium jar 校验每个 `@WrapOperation` 的 `@At` 目标是否仍存在）。
+
+产物：`1.21.1-neoforge-if/build/libs/threadtearer_if-0.1.0.jar`。完整安装步骤见 [安装与使用](1.21.1-neoforge-core/docs/04-install-and-usage.md)。
 
 修改后必须 **完整重启** 游戏（热替换 Mixin 无效）。
 
 ### 本版本源码结构
 
 ```text
-1.21.1-neoforge/src/main/java/com/taolesi/mcthread/
-├── MCThread.java              # @Mod 入口，注册命令与监视器
-├── api/                       # 公共 API（无 Minecraft 依赖）
-├── runtime/                   # ComputePool、InteractionExecutor、乐观工作流
-├── experiment/                # 卸载管线、Relocator、AE2 锁、各规则表
-├── mixin/                     # BoundTicking、BlockStateBase、BlockableEventLoop…
-├── profiler/  monitor/  command/  config/  adapter/  gametest/
+1.21.1-neoforge-if/src/main/java/com/taolesi/threadtearer/industrial/
+├── ThreadTearerIndustrial.java   # @Mod 入口，启动日志
+├── IndustrialOffloadPolicy.java  # 14 台机器的封闭允许清单 + 链校验
+├── IfDeferral.java               # 计算线程上「先算一半、世界写延后」的助手
+├── IndustrialMixinPlugin.java    # IF 不在时整体跳过
+└── mixin/
+    ├── TitaniumTickerMixin.java          # 总闸：BasicTileBlock 的 ticker lambda
+    └── ActiveTileFacingWorkMixin.java    # 邻居自动推送 → 交回主线程
 ```
 
-关键类：
+### 附属的卸载范围（`threadtearer_if`）
 
-- `experiment.InteractionOffloadPipeline` — `relocateVanilla` / `relocateTick`
-- `experiment.InteractionRelocator` — steal 规则、AE2 白名单、BE 锁
-- `runtime.ComputePool` — 伸缩计算池
-- `mixin.BoundTickingBlockEntityMixin` — BE 进计算池的总闸
-- `mixin.BlockableEventLoopMixin` — `isSameThread` 伪装与 `execute` 回投
-- `mixin.MCTMixinPlugin` — 可选模组 Mixin 按类是否存在加载
+IF 的每个机器都是 Titanium 的 `ActiveTile`，所以**总闸只有一个**：`BasicTileBlock.getTicker` 返回的 lambda 里那句 `((ITickableBlockEntity) blockEntity).serverTick(...)`。包住这一句就覆盖了 IF 全部机器，不需要逐机器写 mixin。
+
+代价是这个 lambda 在 Titanium 里，不在 IF 里，所以 mixin 的 target 是 Titanium——用策略层把关：只有 `com.buuz135.industrial.*` 的类才可能被放行，别的 Titanium 模组永远走主线程。
+
+与 Mekanism 不同，IF 没有「一条基类把安全机器和不安全机器分开」的形状，每台机器的差异都在自己的 `work()` / `onFinish()` 里，所以规则是**封闭允许清单**（`IndustrialOffloadPolicy.ALLOWED`，14 台）：一台机器只有在它的 `work()` / `onFinish()` 及其调用链被逐行读过、确认只碰自己的槽位/储罐/能量之后才进清单。被拒绝的族与其原因：
+
+- **读值进入算式的**：Water Condensator（读六个邻居的流体状态，读数决定填充量）、Enchantment Factory / Applicator（从机器**上方**的流体槽抽取，抽出量决定附魔等级）。这类读不能延后——延后了 tick 就得凭空编一个数。
+- **共享随机源**：Sludge Refiner 用 `this.level.random`，是主线程自己也在用的 level 级 `RandomSource`。
+- **实体扫描与区域操作**：所有 `IndustrialAreaWorkingTile` 子类（收割/播种/施肥、喂动物/挤奶/分离幼崽、刷怪/复制、屠宰、抽水、方块破坏/放置、激光钻、水培床……）。
+- **发电机**：`GeneratorTile` 每 tick 往六个邻居推能量，而**收到多少**又反过来决定抽多少，是涡轮那种「发-抽」耦合，单侧延后不成立。
+
+邻居自动推送（`IFacingComponent.work`）不参与上面的判断：它由 `ActiveTileFacingWorkMixin` 对所有被放行的机器一律交回主线程，和 mek 附属围绕 `TileComponentEjector.tickServer` 做的是同一个切分。
+
+开关：`-Dthreadtearer.industrial.offload=false` 让 IF 的所有 tick 回到主线程。
 
 ---
 
@@ -365,10 +410,10 @@ MCThread.Monitor tick=... computeTicks=800 computeActive=2 computeLive=15 comput
 
 | 文档 | 内容 |
 | --- | --- |
-| [01 可行性分析](1.21.1-neoforge/docs/01-feasibility-analysis.md) | 方案论证与 Amdahl 上限 |
-| [02 开发计划](1.21.1-neoforge/docs/02-development-plan.md) | 里程碑 |
-| [03 测试方案](1.21.1-neoforge/docs/03-testing-plan.md) | 分层测试与 A/B 门槛 |
-| [04 安装与使用](1.21.1-neoforge/docs/04-install-and-usage.md) | 客户端/服务端安装 |
-| [05 交互卸载实验](1.21.1-neoforge/docs/05-interaction-offload-experiment.md) | 早期实验笔记 |
-| [协同开发](1.21.1-neoforge/CONTRIBUTING.md) | 线程纪律、Mixin 规则、提交规范 |
-| [变更记录](1.21.1-neoforge/CHANGELOG.md) | 版本历史 |
+| [01 可行性分析](1.21.1-neoforge-core/docs/01-feasibility-analysis.md) | 方案论证与 Amdahl 上限 |
+| [02 开发计划](1.21.1-neoforge-core/docs/02-development-plan.md) | 里程碑 |
+| [03 测试方案](1.21.1-neoforge-core/docs/03-testing-plan.md) | 分层测试与 A/B 门槛 |
+| [04 安装与使用](1.21.1-neoforge-core/docs/04-install-and-usage.md) | 客户端/服务端安装 |
+| [05 交互卸载实验](1.21.1-neoforge-core/docs/05-interaction-offload-experiment.md) | 早期实验笔记 |
+| [协同开发](1.21.1-neoforge-core/CONTRIBUTING.md) | 线程纪律、Mixin 规则、提交规范 |
+| [变更记录](1.21.1-neoforge-core/CHANGELOG.md) | 版本历史 |

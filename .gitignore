@@ -27,5 +27,25 @@ runs
 run-data
 repo
 
+# Each branch carries only its own deliverable; the other branches' project
+# folders are never committed here.
+1.20.1-forge/
+1.21.1-neoforge-core/
+1.21.1-neoforge-mek-addon/
+
+# scratch from past migrations, decompiles and build runs
+.1.20.1-threadtearer-residual/
+.*.bak/
+.decompile/
+net/
+patches/
+.*.log
+.*-mixins.txt
+.*.ps1
+.compare-*.py
+.migrate-*.py
+.repack-*.py
+.verify.py
+
 # local notes / scratch
 *.tmp

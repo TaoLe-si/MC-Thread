@@ -1,0 +1,14 @@
+{
+  "required": true,
+  "minVersion": "0.8",
+  "package": "com.taolesi.threadtearer.industrial.mixin",
+  "compatibilityLevel": "JAVA_21",
+  "plugin": "com.taolesi.threadtearer.industrial.IndustrialMixinPlugin",
+  "mixins": [
+    "TitaniumTickerMixin",
+    "ActiveTileFacingWorkMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}
