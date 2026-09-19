@@ -46,7 +46,7 @@ public abstract class EnderBlockEntityTickMixin {
     @WrapOperation(
             method = "tick(Lnet/minecraft/world/level/Level;Lnet/minecraft/core/BlockPos;"
                     + "Lnet/minecraft/world/level/block/state/BlockState;"
-                    + "Lnet/minecraft/world/level/block/entity/BlockEntity;)V",
+                    + "Lcom/enderio/core/common/blockentity/EnderBlockEntity;)V",
             at = @At(value = "INVOKE",
                     target = "Lcom/enderio/core/common/blockentity/EnderBlockEntity;serverTick()V"),
             remap = false)
