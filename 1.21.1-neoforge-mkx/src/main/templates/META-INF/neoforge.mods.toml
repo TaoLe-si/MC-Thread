@@ -1,0 +1,45 @@
+modLoader="javafml"
+loaderVersion="${loader_version_range}"
+license="${mod_license}"
+issueTrackerURL="https://github.com/TaoLe-si/MC-Thread/issues"
+
+[[mods]]
+modId="${mod_id}"
+version="${mod_version}"
+displayName="${mod_name}"
+displayURL="https://github.com/TaoLe-si/MC-Thread"
+authors="${mod_authors}"
+description='''${mod_description}'''
+
+[[mixins]]
+config="${mod_id}.mixins.json"
+
+[[dependencies.${mod_id}]]
+    modId="threadtearer"
+    type="required"
+    versionRange="[0.3.0,)"
+    ordering="AFTER"
+    side="BOTH"
+
+# The addon's chokepoint wrapper composes with the mek addon's
+# TileEntityMekanismTickMixin wrapper (both wrap onUpdateServer()). The mek
+# addon's ejector defer is also reused — this addon writes no ejector mixin
+# of its own. Required, ordering=AFTER so the mek addon's mixins apply first.
+[[dependencies.${mod_id}]]
+    modId="threadtearer_mek"
+    type="required"
+    versionRange="[0.3.9,)"
+    ordering="AFTER"
+    side="BOTH"
+
+[[dependencies.${mod_id}]]
+    modId="mekanism"
+    type="required"
+    ordering="AFTER"
+    side="BOTH"
+
+[[dependencies.${mod_id}]]
+    modId="mekanism_extras"
+    type="required"
+    ordering="AFTER"
+    side="BOTH"
