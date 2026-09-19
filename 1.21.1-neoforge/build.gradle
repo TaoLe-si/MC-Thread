@@ -81,6 +81,9 @@ dependencies {
     testImplementation 'org.slf4j:slf4j-api:2.0.9'
     testRuntimeOnly 'org.slf4j:slf4j-simple:2.0.9'
     testImplementation files('libs/gson-2.10.1.jar')
+    // InteractionRelocator declares methods taking Mixin's CallbackInfo, so
+    // loading the class in a unit test needs the annotation types present.
+    testImplementation 'org.spongepowered:mixin:0.8.5'
 }
 
 tasks.named('test', Test).configure {
@@ -115,12 +118,14 @@ publishing {
     publications {
         register('mavenJava', MavenPublication) {
             from components.java
+            artifactId = mod_id
         }
     }
     repositories {
         maven {
             url "file://${project.projectDir}/repo"
         }
+        mavenLocal()
     }
 }
 
@@ -128,9 +133,26 @@ tasks.withType(JavaCompile).configureEach {
     options.encoding = 'UTF-8'
 }
 
+// Mixin package hygiene, run before anything compiles: a non-mixin class left
+// in a mixin package crashes the game the first time a mixin of that config
+// applies (IllegalClassLoadError), which can be long after startup and only in
+// a world that triggers that mixin. Skipped when python is unavailable so a
+// machine without it can still build.
+def pythonAvailable = providers.exec {
+    commandLine 'python', '--version'
+    ignoreExitValue = true
+}.result.map { it.exitValue == 0 }
+var verifyMixins = tasks.register('verifyMixins', Exec) {
+    group = 'verification'
+    description = 'Checks that no undeclared class sits in a mixin package'
+    commandLine 'python', 'tools/verify_mixin_packages.py'
+    onlyIf { pythonAvailable.get() }
+}
+tasks.named('compileJava').configure { dependsOn verifyMixins }
+
 tasks.named('jar', Jar).configure {
     manifest {
-        attributes('MixinConfigs': 'mcthread.mixins.json')
+        attributes('MixinConfigs': 'threadtearer.mixins.json')
     }
 }
 

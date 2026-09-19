@@ -77,9 +77,9 @@
 游戏内（权限 2）：
 
 ```
-/mcthread experiment status
-/mcthread experiment on     # 放置/使用走请求→计算→主线程 apply
-/mcthread experiment off    # 立即回退原版
+/threadtearer experiment status
+/threadtearer experiment on     # 放置/使用走请求→计算→主线程 apply
+/threadtearer experiment off    # 立即回退原版
 ```
 
 ## 6. 结论

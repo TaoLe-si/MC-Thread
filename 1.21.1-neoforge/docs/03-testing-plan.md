@@ -16,15 +16,15 @@
 | --- | --- | --- | --- | --- |
 | L1 单元测试 | JVM，无需游戏 | `gradlew test`（JUnit 5） | 计算池、交互执行器、快照、事务 | 每次提交 |
 | L2 服务器内 GameTest | 开发环境 GameTestServer | `gradlew runGameTestServer` | 服务器线程纪律、快照-计算-校验-提交闭环、FIFO 顺序 | 每次合入前 |
-| L3 命令级自检 | 游戏内 | `/mcthread selftest` | 运行时可观测行为汇总 | 冒烟/人工 |
-| L4 基准 A/B | 固定种子 + 固定操作序列 | `/mcthread bench` + replay | 优化前后 Tick 耗时对比 | 每个优化项 |
+| L3 命令级自检 | 游戏内 | `/threadtearer selftest` | 运行时可观测行为汇总 | 冒烟/人工 |
+| L4 基准 A/B | 固定种子 + 固定操作序列 | `/threadtearer bench` + replay | 优化前后 Tick 耗时对比 | 每个优化项 |
 | L5 长跑 soak | 专用服务器 100h+ | TPS/GC/日志监控 | 稳定性、内存、Heisenbug | 发布前 |
 | L6 兼容矩阵 | 客户端/单机/服务器 × 模组组合 | 手动 + 脚本 | 共存、冲突、降级 | 每个里程碑 |
 | L7 发布回归 | 与 L1-L6 全量 | CI | 发布候选 | 发布前 |
 
 ## 3. L1 单元测试清单
 
-测试文件：`src/test/java/com/taolesi/mcthread/runtime/`
+测试文件：`src/test/java/com/taolesi/threadtearer/runtime/`
 
 | 用例 | 验证点 | 通过标准 |
 | --- | --- | --- |
@@ -79,7 +79,7 @@
 
 ## 4. L2 服务器内 GameTest 清单
 
-测试类：`com.taolesi.mcthread.gametest.MCTGameTests`，注册于 `RegisterGameTestsEvent`。
+测试类：`com.taolesi.threadtearer.gametest.MCTGameTests`，注册于 `RegisterGameTestsEvent`。
 
 | 用例 | 验证点 |
 | --- | --- |
@@ -115,15 +115,15 @@
 ### 5.2 测量流程
 
 ```text
-/mcthread bench start <ticks>     # 默认 600 ticks
+/threadtearer bench start <ticks>     # 默认 600 ticks
 # 运行固定操作序列
-/mcthread bench report [json]     # avg/max tick、overrun、按 mod 采样占比、GC 时间
-/mcthread replay export           # 导出事件流用于回归复现
+/threadtearer bench report [json]     # avg/max tick、overrun、按 mod 采样占比、GC 时间
+/threadtearer replay export           # 导出事件流用于回归复现
 ```
 
 ### 5.6 游戏变化监测验证
 
-- 触发固定事件（生成 10 只生物、放置/破坏区块边界的方块），`/mcthread monitor status` 与 `MCThread.Monitor` 日志中的计数应与操作一致；
+- 触发固定事件（生成 10 只生物、放置/破坏区块边界的方块），`/threadtearer monitor status` 与 `MCThread.Monitor` 日志中的计数应与操作一致；
 - replay JSON 中同一 tick 的 `entityJoins`/`chunkLoads` 字段与监测计数一致；
 - 该数据用于将 Tick 尖峰与真实世界变化对齐（L5 soak 的核心关联手段）。
 
@@ -155,7 +155,7 @@
 
 - 专用服务器，目标模组包（如 All of Create），模拟在线玩家行为脚本；
 - 时长：≥100 小时；
-- 监控：TPS 曲线、GC 日志（`-Xlog:gc`）、堆使用、`/mcthread runtime status` 定期采样；
+- 监控：TPS 曲线、GC 日志（`-Xlog:gc`）、堆使用、`/threadtearer runtime status` 定期采样；
 - 通过标准：无崩溃、无物品丢失/重复、无 Tick 长时间停滞、内存曲线平稳；
 - 回归：soak 期间发现的问题先用 replay 事件流 + 快照复现，再修复（Replay 先于调试）。
 
@@ -193,7 +193,7 @@ gradlew build                 # 打包
 
 - L1：23 个用例（见第 3 节）——已实现并通过；
 - L2：2 个用例——已实现，待服务器内执行；
-- L3：`/mcthread selftest`——已实现；
+- L3：`/threadtearer selftest`——已实现；
 - L4：bench/replay 命令——已实现，基准场景需在目标模组包上建立；
 - L5/L6/L7：随里程碑推进。
 

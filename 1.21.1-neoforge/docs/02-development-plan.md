@@ -8,7 +8,7 @@
 | 阶段 | 名称 | 目标 | 关键产出 | 验证方式 |
 | --- | --- | --- | --- | --- |
 | M0 | 框架搭建（本次） | 可编译、可启动的 1.21.1 NeoForge 模组工程 | 工程 + Git 绑定 + 文档 | `gradlew build` 产出 jar |
-| M1 | 度量体系 ✅基础版 | 先证明"哪里慢" | Tick 归因 Profiler、Replay 事件流、Benchmark、`/mcthread prof/replay/bench` | 可重复输出热图 |
+| M1 | 度量体系 ✅基础版 | 先证明"哪里慢" | Tick 归因 Profiler、Replay 事件流、Benchmark、`/threadtearer prof/replay/bench` | 可重复输出热图 |
 | M2 | 运行时核心 ✅完整版 | 计算与交互分离的 API | ComputePool、InteractionExecutor、Snapshot/Transaction、乐观并发工作流、Delta 缓存、Adapter 框架 + 参考适配器 | GameTest + 单元测试 |
 | M3 | 通用低层优化 ✅首批实现 | 不要求适配的通用收益 | 能力查询快速路径（Mixin，默认关）、异步导出（默认开）、Mixin 基础设施；分配减少/事件减支待基准门槛 | 每项 A/B ≥5% 才保留 |
 | M4 | 通用交互优化落地 | 端到端证明优化收益 | 异步存档序列化、事件减支等通用优化（A/B 门槛）；Adapter 框架可选 | Replay 同场景前后对比 |
@@ -22,7 +22,7 @@
 - 采样式与插桩式双模式：
   - 采样：每 tick 记录主线程调用栈热点，归因到模组类；
   - 插桩：对高频事件（`ServerTickEvent`、`LevelTickEvent`、BE/Entity tick）计时，归因到监听器方法与 BE/实体类型；
-- 输出：`/mcthread prof start|stop|report`，支持 JSON 导出与聚合热图；
+- 输出：`/threadtearer prof start|stop|report`，支持 JSON 导出与聚合热图；
 - 目标：任何模组包，五分钟内得到"每模组每 tick 毫秒数"。
 
 ### 1.2 Replay 事件流（v1）
@@ -53,7 +53,7 @@
 - `Transaction<T>`：变化集合 + Write-on-Commit + Rollback（笔记 Chapter 11）；
 - 乐观并发：Assume → Compute → Validate → Commit / Retry。
 
-### 2.3 对外 API（`mcthread.api`）
+### 2.3 对外 API（`threadtearer.api`）
 
 - 仅依赖 Minecraft/NeoForge 公共 API，供第三方模组编译期接入；
 - 最小接口：`Runtime`, `Snapshot`, `Validator`, `Transaction`, `DomainAdapter`。
@@ -84,7 +84,7 @@
 
 ## 5. M5 通用性与兼容
 
-- `mcthread.api` 文档与示例模组；
+- `threadtearer.api` 文档与示例模组；
 - 配置预设：`client` / `vanilla-server` / `tech-heavy` / `all-off`；
 - 测试矩阵：纯客户端、单机局域网、专用服务器、与常见优化/工具模组共存；
 - CI：每次提交跑 `build` + GameTest + 基准冒烟。
@@ -113,7 +113,7 @@
 - **M1 已实现**（对应测试方案见 [docs/03-testing-plan.md](03-testing-plan.md)）：
   - 单元测试 11 个（计算池/交互执行器/快照/事务）；
   - GameTest 2 个（快照-计算-提交闭环、FIFO 顺序）；
-  - `/mcthread` 命令树（prof/replay/bench/runtime/selftest）。
+  - `/threadtearer` 命令树（prof/replay/bench/runtime/selftest）。
 - **M2 完整版已实现**：
   - `optimistic(...)` 乐观并发工作流（快照→计算→校验→提交/重试，过期抛 `StaleSnapshotException`）；
   - `DeltaCache` 增量缓存（版本化脏标记）；

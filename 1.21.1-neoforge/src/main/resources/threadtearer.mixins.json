@@ -1,0 +1,40 @@
+{
+  "required": true,
+  "minVersion": "0.8",
+  "package": "com.taolesi.threadtearer.mixin",
+  "compatibilityLevel": "JAVA_21",
+  "plugin": "com.taolesi.threadtearer.mixin.MCTMixinPlugin",
+  "mixins": [
+    "AbstractContainerMenuMixin",
+    "BlockEntityMixin",
+    "BlockStateMixin",
+    "BlockableEventLoopMixin",
+    "ChunkHolderMixin",
+    "CommandsMixin",
+    "CommonHooksMixin",
+    "ConnectionMixin",
+    "DistanceManagerMixin",
+    "EntityMixin",
+    "ExperienceOrbMixin",
+    "ExplosionMixin",
+    "InventoryMixin",
+    "ItemEntityMixin",
+    "ItemStackMixin",
+    "LevelMixin",
+    "LivingEntityMixin",
+    "PacketUtilsMixin",
+    "PistonBaseBlockMixin",
+    "PlayerListMixin",
+    "PlayerMixin",
+    "RandomizableContainerBlockEntityMixin",
+    "ServerChunkCacheMixin",
+    "ServerGamePacketListenerImplMixin",
+    "ServerLevelMixin",
+    "ServerPlayerGameModeMixin",
+    "ServerPlayerMixin",
+    "SimpleContainerMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}

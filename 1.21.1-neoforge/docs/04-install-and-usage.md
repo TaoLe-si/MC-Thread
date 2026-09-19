@@ -15,7 +15,7 @@
 
 ```powershell
 # 手动
-Copy-Item D:\MCCode\build\libs\mcthread-0.1.0.jar "D:\你的游戏目录\mods\"
+Copy-Item D:\MCCode\build\libs\threadtearer-0.1.0.jar "D:\你的游戏目录\mods\"
 
 # 或使用 Gradle 任务（自动复制构建产物）
 .\gradlew.bat copyToMods -PmodsDir="D:\你的游戏目录\mods"
@@ -27,23 +27,23 @@ Copy-Item D:\MCCode\build\libs\mcthread-0.1.0.jar "D:\你的游戏目录\mods\"
 ## 3. 安装到服务器
 
 1. 安装 NeoForge 1.21.1 服务端（21.1.x），首次启动生成 `eula.txt` 并改为 `eula=true`；
-2. 将 `mcthread-0.1.0.jar` 复制到服务端 `mods` 文件夹；
+2. 将 `threadtearer-0.1.0.jar` 复制到服务端 `mods` 文件夹；
 3. 启动服务器，控制台应出现 `[Thread Tearer]` 开头的日志。
 
 ## 4. 命令速查
 
 | 命令 | 作用 |
 | --- | --- |
-| `/mcthread runtime status` | 运行时总览（线程数、profiler/replay/benchmark 状态、最近 tick 变化、已挂载适配器） |
-| `/mcthread monitor status` | 游戏变化监测（最近 tick 的区块/实体变化计数） |
-| `/mcthread adapters list` | 适配器清单与可用状态 |
-| `/mcthread prof start [intervalMs]` | 开始 Tick 采样（默认 5ms 间隔） |
-| `/mcthread prof stop` / `report [json]` | 停止采集 / 输出按模组归因报告 |
-| `/mcthread replay start <场景>` / `stop` / `export` | 记录按 tick 的事件流并导出 JSON |
-| `/mcthread bench start <ticks>` / `stop` / `report [json]` | 固定窗口基准测试（默认 600 ticks） |
-| `/mcthread demo run <recipes> <iterations>` | 运行参考适配器（端到端演示乐观工作流） |
-| `/mcthread experiment [status\|on\|off]` | 交互卸载（原版交互方法搬迁；默认开） |
-| `/mcthread selftest` | 运行时自检 |
+| `/threadtearer runtime status` | 运行时总览（线程数、profiler/replay/benchmark 状态、最近 tick 变化、已挂载适配器） |
+| `/threadtearer monitor status` | 游戏变化监测（最近 tick 的区块/实体变化计数） |
+| `/threadtearer adapters list` | 适配器清单与可用状态 |
+| `/threadtearer prof start [intervalMs]` | 开始 Tick 采样（默认 5ms 间隔） |
+| `/threadtearer prof stop` / `report [json]` | 停止采集 / 输出按模组归因报告 |
+| `/threadtearer replay start <场景>` / `stop` / `export` | 记录按 tick 的事件流并导出 JSON |
+| `/threadtearer bench start <ticks>` / `stop` / `report [json]` | 固定窗口基准测试（默认 600 ticks） |
+| `/threadtearer demo run <recipes> <iterations>` | 运行参考适配器（端到端演示乐观工作流） |
+| `/threadtearer experiment [status\|on\|off]` | 交互卸载（原版交互方法搬迁；默认开） |
+| `/threadtearer selftest` | 运行时自检 |
 
 ## 5. 日志与数据解读
 
@@ -58,7 +58,7 @@ Copy-Item D:\MCCode\build\libs\mcthread-0.1.0.jar "D:\你的游戏目录\mods\"
 | `MCThread.Adapters` | 适配器 attach/detach |
 | `MCThread.Interaction` | 低级交互（破坏方块等） |
 
-导出文件默认写入 `<服务器目录>/mcthread/`（开发环境为 `run/mcthread/`）：
+导出文件默认写入 `<服务器目录>/threadtearer/`（开发环境为 `run/threadtearer/`）：
 
 - `profile-*.json` / `bench-*.json`：按模组采样占比 + 预估每 tick 耗时（`estTickMs`）、avg/max tick、overrun、GC 时间；
 - `replay-*.json`：每条记录字段：`tick`、`tps`、`tickMs`、`players`、`chunkLoads`、`chunkUnloads`、`entityJoins`、`entityLeaves`、`overrun`。

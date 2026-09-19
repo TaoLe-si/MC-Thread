@@ -12,14 +12,7 @@ authors="${mod_authors}"
 description='''${mod_description}'''
 
 [[mixins]]
-config="mcthread.mixins.json"
-
-[[dependencies.${mod_id}]]
-modId="neoforge"
-type="required"
-versionRange="[${neo_version},)"
-ordering="NONE"
-side="BOTH"
+config="threadtearer.mixins.json"
 
 [[dependencies.${mod_id}]]
 modId="minecraft"

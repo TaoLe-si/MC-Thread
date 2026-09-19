@@ -1,0 +1,11 @@
+[
+  {
+    "class": "mekanism.common.tile.TileEntityQuantumEntangloporter",
+    "hits": [
+      [
+        "Level",
+        "net/minecraft/world/level/Level.getGameTime:()J"
+      ]
+    ]
+  }
+]
