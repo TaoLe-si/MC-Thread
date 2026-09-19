@@ -58,25 +58,27 @@ import org.spongepowered.asm.mixin.injection.Coerce;
 public abstract class TileEntityMekanismTickMixin {
 
     @WrapOperation(
-            method = "tick(Lnet/minecraft/world/level/Level;Lnet/minecraft/core/BlockPos;"
+            method = "tickServer(Lnet/minecraft/world/level/Level;Lnet/minecraft/core/BlockPos;"
                     + "Lnet/minecraft/world/level/block/state/BlockState;"
                     + "Lmekanism/common/tile/base/TileEntityMekanism;)V",
             at = @At(value = "INVOKE",
                     target = "Lmekanism/common/tile/base/TileEntityMekanism;onUpdateServer()Z"),
             remap = false)
-    private static void threadtearer$dispatchOnUpdateServer(@Coerce Object self, Operation<Boolean> original) {
+    private static boolean threadtearer$dispatchOnUpdateServer(@Coerce Object self, Operation<Boolean> original) {
         // self is the TileEntityMekanism instance — the receiver of onUpdateServer().
         if (!(self instanceof BlockEntity be) || !MkxOffloadPolicy.mayOffload(be)) {
-            original.call(self);
-            return;
+            return original.call(self);
         }
         // Dispatch to a compute worker under the BE's per-tick lock; the lock
         // matches the one the mek addon's ejector defer takes when the
         // neighbour-IO runs on the server thread, so worker tick and
-        // server-thread ejector cannot overlap on the same machine.
+        // server-thread ejector cannot overlap on the same machine. An
+        // offloaded tick returns false because the "broadcast an update
+        // packet" value cannot cross the async boundary — same as the mek
+        // addon's TileEntityMekanismTickMixin.
         if (InteractionRelocator.stealTick(be, () -> original.call(self))) {
-            return;
+            return false;
         }
-        original.call(self);
+        return original.call(self);
     }
 }
