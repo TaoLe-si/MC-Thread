@@ -1,4 +1,4 @@
-package com.taolesi.threadtearer.mekx;
+package com.taolesi.threadtearer.ie;
 
 import org.objectweb.asm.tree.ClassNode;
 import org.spongepowered.asm.mixin.extensibility.IMixinConfigPlugin;
@@ -8,18 +8,17 @@ import java.util.List;
 import java.util.Set;
 
 /**
- * The addon's mixin plugin. No-op when Mekanism (and with it Mekanism Extras)
- * is absent, so the addon can ship alongside packs that don't run either
- * mod. The {@code ifPresent} probe checks the mek main {@code @Mod} class —
- * Mekanism Extras is hard-required to depend on Mekanism, so mek being on
- * the classpath is enough to know the rest is too.
+ * The addon's mixin plugin. No-op when Immersive Engineering is absent, so
+ * the addon can ship alongside packs that don't use IE. The {@code ifPresent}
+ * probe checks for IE's {@code @Mod} class — its mere presence is enough
+ * to know the rest of the classpath is reachable.
  */
-public class MkxMixinPlugin implements IMixinConfigPlugin {
+public class IeMixinPlugin implements IMixinConfigPlugin {
 
-    /** True iff Mekanism is on the classpath (Mekanism Extras necessarily with it). */
-    public static final boolean ifPresent = MkxMixinPlugin.class
+    /** True iff Immersive Engineering is on the classpath. */
+    public static final boolean ifPresent = IeMixinPlugin.class
             .getClassLoader()
-            .getResource("mekanism/common/Mekanism.class") != null;
+            .getResource("blusunrize/immersiveengineering/ImmersiveEngineering.class") != null;
 
     @Override
     public void onLoad(String mixinPackage) {

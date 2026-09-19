@@ -1,0 +1,14 @@
+{
+  "required": true,
+  "minVersion": "0.8",
+  "package": "com.taolesi.threadtearer.ie.mixin",
+  "compatibilityLevel": "JAVA_21",
+  "plugin": "com.taolesi.threadtearer.ie.IeMixinPlugin",
+  "mixins": [
+    "IEServerTickableBETickMixin",
+    "ClocheEjectorMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}

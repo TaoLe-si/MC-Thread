@@ -56,19 +56,14 @@ dependencies {
     // surface). Compiled and consumed via mavenLocal.
     implementation "com.taolesi.threadtearer:threadtearer:${threadtearer_version}"
 
-    // Mekanism jar used as compileOnly so the mixin can reference
-    // TileEntityMekanism and TileComponentEjector. The 16 factory classes in
-    // MkxOffloadPolicy.ALLOWED are not referenced from compiled code (they are
-    // matched by string FQCN at runtime via Mixin's `targets =` resolution), so
-    // no Mekanism Extras symbol is needed at compile time either.
-    compileOnly files(mekanism_compile_jar)
-
-    // Mekanism Extras jar used as compileOnly so that the Mixin class itself
-    // can be referenced at all (otherwise Mixin's annotation processor might
-    // not find the @Pseudo mixin target). Runtime still comes from the user's
-    // installed copy via the deps declared in neoforge.mods.toml.
-    compileOnly files(mekextras_compile_jar)
-    compileOnly files(mekmm_compile_jar)
+    // Immersive Engineering jar used as compileOnly so the mixins can
+    // reference IEBaseBlockEntity (the shared base every IEServerTickableBE
+    // walks up to) and IEServerTickableBE (the single chokepoint interface).
+    // The three BE classes in IeOffloadPolicy.ALLOWED are matched by string
+    // FQCN at runtime via Mixin's `targets =` resolution, so no IE symbol is
+    // needed at compile time beyond the shared base. Runtime comes from the
+    // user's installed copy via the deps declared in neoforge.mods.toml.
+    compileOnly files(ie_compile_jar)
 
     testImplementation 'org.junit.jupiter:junit-jupiter:5.10.2'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
@@ -116,18 +111,13 @@ publishing {
 
 tasks.withType(JavaCompile).configureEach {
     options.encoding = 'UTF-8'
-    // Disable incremental compilation: the skeleton is small and incremental
-    // breaks same-package resolution when one class references another (the
-    // referenced class isn't compiled yet, so the reference is unresolved
-    // even though both source files are in the batch).
-    options.incremental = false
 }
 
-// Mixin package hygiene gate. Cheap and always runs; catches the
-// "undeclared class in the mixin package" crash shape that
-// `IllegalClassLoadException` produces when a non-mixin helper sits in a
-// declared mixin package. Skipped when python is unavailable so a machine
-// without it can still build.
+// Mixin package hygiene and @WrapOperation target verification, run before
+// anything compiles. Both catch failures that would otherwise only appear in
+// game: an undeclared class in a mixin package crashes the moment its mixin
+// applies, and a stale ordinal silently wraps the wrong call. Skipped when
+// python is unavailable so a machine without it can still build.
 def pythonAvailable = providers.exec {
     commandLine 'python', '--version'
     ignoreExitValue = true
@@ -138,7 +128,13 @@ var verifyMixins = tasks.register('verifyMixins', Exec) {
     commandLine 'python', 'tools/verify_mixin_packages.py'
     onlyIf { pythonAvailable.get() }
 }
-tasks.named('compileJava').configure { dependsOn verifyMixins }
+var verifyMixinTargets = tasks.register('verifyMixinTargets', Exec) {
+    group = 'verification'
+    description = 'Checks @WrapOperation targets against the installed IE jar'
+    commandLine 'python', 'tools/verify_mixin_targets.py'
+    onlyIf { pythonAvailable.get() }
+}
+tasks.named('compileJava').configure { dependsOn verifyMixins, verifyMixinTargets }
 
 tasks.named('jar', Jar).configure {
     manifest {

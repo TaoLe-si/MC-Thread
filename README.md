@@ -13,13 +13,14 @@
 | [`1.21.1-neoforge-mek-addon`](https://github.com/TaoLe-si/MC-Thread/tree/1.21.1-neoforge-mek-addon) | [`1.21.1-neoforge-mek-addon/`](1.21.1-neoforge-mek-addon/) | 1.21.1 | NeoForge 21.1 | 附属：Mekanism |
 | [`1.21.1-neoforge-if`](https://github.com/TaoLe-si/MC-Thread/tree/1.21.1-neoforge-if) | [`1.21.1-neoforge-if/`](1.21.1-neoforge-if/) | 1.21.1 | NeoForge 21.1 | 附属：Industrial Foregoing |
 | [`1.21.1-neoforge-eio`](https://github.com/TaoLe-si/MC-Thread/tree/1.21.1-neoforge-eio) | [`1.21.1-neoforge-eio/`](1.21.1-neoforge-eio/) | 1.21.1 | NeoForge 21.1 | 附属：EnderIO |
-| [`1.21.1-neoforge-mkx`](https://github.com/TaoLe-si/MC-Thread/tree/1.21.1-neoforge-mkx) | [`1.21.1-neoforge-mkx/`](1.21.1-neoforge-mkx/) | 1.21.1 | NeoForge 21.1 | 附属：Mekanism Extras（本分支） |
+| [`1.21.1-neoforge-mkx`](https://github.com/TaoLe-si/MC-Thread/tree/1.21.1-neoforge-mkx) | [`1.21.1-neoforge-mkx/`](1.21.1-neoforge-mkx/) | 1.21.1 | NeoForge 21.1 | 附属：Mekanism Extras |
+| [`1.21.1-neoforge-ie`](https://github.com/TaoLe-si/MC-Thread/tree/1.21.1-neoforge-ie) | [`1.21.1-neoforge-ie/`](1.21.1-neoforge-ie/) | 1.21.1 | NeoForge 21.1 | 附属：Immersive Engineering（本分支） |
 
 附属分支只含该附属自己的工程，核心以 mavenLocal 依赖引入，需先在核心分支构建并 `publishToMavenLocal`。克隆后请检出对应分支，并在对应目录里构建：
 
 ```powershell
 git clone https://github.com/TaoLe-si/MC-Thread.git
-git checkout 1.21.1-neoforge-mkx
+git checkout 1.21.1-neoforge-ie
 cd 1.21.1-neoforge-mkx
 .\gradlew.bat build
 ```

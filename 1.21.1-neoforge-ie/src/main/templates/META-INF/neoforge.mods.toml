@@ -21,25 +21,9 @@ config="${mod_id}.mixins.json"
     ordering="AFTER"
     side="BOTH"
 
-# The addon's chokepoint wrapper composes with the mek addon's
-# TileEntityMekanismTickMixin wrapper (both wrap onUpdateServer()). The mek
-# addon's ejector defer is also reused — this addon writes no ejector mixin
-# of its own. Required, ordering=AFTER so the mek addon's mixins apply first.
 [[dependencies.${mod_id}]]
-    modId="threadtearer_mek"
+    modId="immersiveengineering"
     type="required"
-    versionRange="[0.3.9,)"
-    ordering="AFTER"
-    side="BOTH"
-
-[[dependencies.${mod_id}]]
-    modId="mekanism"
-    type="required"
-    ordering="AFTER"
-    side="BOTH"
-
-[[dependencies.${mod_id}]]
-    modId="mekanism_extras"
-    type="required"
+    versionRange="[12.4.0,)"
     ordering="AFTER"
     side="BOTH"
