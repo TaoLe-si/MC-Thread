@@ -1,0 +1,152 @@
+plugins {
+    id 'java-library'
+    id 'maven-publish'
+    id 'net.neoforged.moddev' version '2.0.147'
+}
+
+version = mod_version
+group = mod_group_id
+
+repositories {
+    mavenLocal()
+    maven { url = 'https://maven.aliyun.com/repository/central' }
+    mavenCentral()
+}
+
+base {
+    archivesName = mod_id
+}
+
+java.toolchain.languageVersion = JavaLanguageVersion.of(21)
+
+neoForge {
+    version = project.neo_version
+
+    runs {
+        client {
+            client()
+            systemProperty 'neoforge.enabledGameTestNamespaces', project.mod_id
+        }
+        server {
+            server()
+            programArgument '--nogui'
+            systemProperty 'neoforge.enabledGameTestNamespaces', project.mod_id
+        }
+        configureEach {
+            systemProperty 'forge.logging.markers', 'REGISTRIES'
+            logLevel = org.slf4j.event.Level.DEBUG
+        }
+    }
+
+    mods {
+        "${mod_id}" {
+            sourceSet(sourceSets.main)
+        }
+    }
+}
+
+sourceSets.main.resources { srcDir 'src/generated/resources' }
+
+configurations {
+    runtimeClasspath.extendsFrom localRuntime
+}
+
+dependencies {
+    // The Thread Tearer core (provides the API + interaction/apply mixin
+    // surface). Compiled and consumed via mavenLocal.
+    implementation "com.taolesi.threadtearer:threadtearer:${threadtearer_version}"
+
+    // EnderIO + EnderCore jars used as compileOnly so the mixins can name the
+    // endercore EnderBlockEntity.tick chokepoint and the EnderIO
+    // MachineBlockEntity.distributeResources(Direction) target. The addon stays a
+    // thin mod — these jars are only on the compile classpath. Runtime comes
+    // from the user's installed EnderIO mod, declared in neoforge.mods.toml.
+    compileOnly files(enderio_compile_jar)
+    compileOnly files(endercore_compile_jar)
+
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.10.2'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+tasks.named('test', Test).configure {
+    useJUnitPlatform()
+    testLogging {
+        events 'passed', 'skipped', 'failed'
+    }
+}
+
+var generateModMetadata = tasks.register("generateModMetadata", ProcessResources) {
+    var replaceProperties = [
+            minecraft_version       : minecraft_version,
+            minecraft_version_range : minecraft_version_range,
+            neo_version             : neo_version,
+            loader_version_range    : loader_version_range,
+            mod_id                  : mod_id,
+            mod_name                : mod_name,
+            mod_license             : mod_license,
+            mod_version             : mod_version,
+            mod_authors             : mod_authors,
+            mod_description         : mod_description
+    ]
+    inputs.properties replaceProperties
+    expand replaceProperties
+    from "src/main/templates"
+    into "build/generated/sources/modMetadata"
+}
+sourceSets.main.resources.srcDir generateModMetadata
+neoForge.ideSyncTask generateModMetadata
+
+publishing {
+    publications {
+        register('mavenJava', MavenPublication) {
+            from components.java
+            artifactId = mod_id
+        }
+    }
+    repositories {
+        mavenLocal()
+    }
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+    // Disable incremental compilation: the skeleton is small and incremental
+    // breaks same-package resolution when one class references another (the
+    // referenced class isn't compiled yet, so the reference is unresolved
+    // even though both source files are in the batch).
+    options.incremental = false
+}
+
+// Mixin package hygiene and (when the matching jar is present) @WrapOperation
+// target verification. The hygiene check is cheap and always runs; the target
+// check requires EnderIO + EnderCore jars at known paths and is wired in via
+// tools/verify_mixin_targets.py when those land. Skipped when python is
+// unavailable so a machine without it can still build.
+def pythonAvailable = providers.exec {
+    commandLine 'python', '--version'
+    ignoreExitValue = true
+}.result.map { it.exitValue == 0 }
+var verifyMixins = tasks.register('verifyMixins', Exec) {
+    group = 'verification'
+    description = 'Checks that no undeclared class sits in a mixin package'
+    commandLine 'python', 'tools/verify_mixin_packages.py'
+    onlyIf { pythonAvailable.get() }
+}
+tasks.named('compileJava').configure { dependsOn verifyMixins }
+
+tasks.named('jar', Jar).configure {
+    manifest {
+        attributes('MixinConfigs': "${mod_id}.mixins.json")
+    }
+}
+
+tasks.register('copyToMods', Copy) {
+    group = 'modpack'
+    description = 'Copies the built jar into a game mods folder (-PmodsDir=...)'
+    dependsOn 'jar'
+    from layout.buildDirectory.dir('libs')
+    include '*.jar'
+    def dir = providers.gradleProperty('modsDir')
+    into dir
+    onlyIf { dir.isPresent() }
+}
