@@ -5,7 +5,7 @@
   "compatibilityLevel": "JAVA_21",
   "plugin": "com.taolesi.threadtearer.ie.IeMixinPlugin",
   "mixins": [
-    "IEServerTickableBETickMixin",
+    "IEClassInspectedDataTickerMixin",
     "ClocheEjectorMixin"
   ],
   "injectors": {

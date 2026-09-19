@@ -25,35 +25,36 @@ JARS = [os.path.join(MODS, JAR_NAME)]
 
 # (mixin, target class, method name, method descriptor, wrapped owner, wrapped name, wrapped descriptor, ordinal or None)
 #
-# Three call sites to verify:
-#   1. IEServerTickableBE.lambda$makeTicker$0 — the synthetic 4-arg ticker
-#      lambda body that dispatches to BE.tickServer(). The @At targets the
-#      invocation of `tickServer()` inside the lambda so the mixin can
-#      decide whether to dispatch to a worker (policy gate) before letting
-#      tickServer actually run.
+# Two call sites to verify:
+#   1. IEEntityBlock$BEClassInspectedData.makeBaseTicker — the invokestatic
+#      of IEServerTickableBE.makeTicker(). The wrapper returns a delegating
+#      ticker that applies the offload policy per BE per tick. This is the
+#      chokepoint; the original interface-targeting variant was rejected by
+#      Mixin (a class mixin cannot target an interface), so the wrap moved
+#      to the class that calls makeTicker().
 #   2. ClocheBlockEntity.tickServer — the `invokestatic` of
 #      `ItemHandlerHelper.insertItem(IItemHandler, ItemStack, Z)ItemStack`,
 #      which is the ejector that pushes the grown seed/soil output to a
 #      neighbour IItemHandler. The wrapper defers it to the server-thread
 #      FIFO so concurrent worker calls on the same neighbour don't race.
 CHECKS = [
-    # Chokepoint: tickServer invocation, dispatched by the synthetic lambda
-    # IEServerTickableBE.makeTicker creates. The wrapper's @At targets
-    # tickServer() on the IEServerTickableBE interface so the worker
-    # dispatch happens after the canTickAny() guard.
-    ("IEServerTickableBETickMixin",
-     "blusunrize.immersiveengineering.common.blocks.ticking.IEServerTickableBE", "lambda$makeTicker$0",
-     "(Lnet/minecraft/world/level/Level;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/block/entity/BlockEntity;)V",
-     "blusunrize.immersiveengineering.common.blocks.ticking.IEServerTickableBE", "tickServer",
-     "()V", None),
+    # Chokepoint: the invokestatic of IEServerTickableBE.makeTicker() inside
+    # the record's makeBaseTicker. The wrapped call is static, so the handler
+    # takes no receiver; its return type is the ticker the wrapper re-wraps.
+    # Note: the owner is written with dots here because the script normalizes
+    # javap's slash-separated owners to dots before comparing. The mixin's
+    # @At target itself correctly uses slashes (JVM internal name).
+    ("IEClassInspectedDataTickerMixin",
+     "blusunrize.immersiveengineering.common.blocks.IEEntityBlock$BEClassInspectedData", "makeBaseTicker",
+     "(Z)Lnet/minecraft/world/level/block/entity/BlockEntityTicker;",
+     "blusunrize.immersiveengineering.common.blocks.ticking.IEServerTickableBE", "makeTicker",
+     "()Lnet/minecraft/world/level/block/entity/BlockEntityTicker;", 0),
     # Cloche ejector: ItemHandlerHelper.insertItem(IItemHandler, ItemStack, Z)
     # called from ClocheBlockEntity.tickServer. The wrapper defers the
     # non-simulate branch to deferWorldWrite; the FIFO is drained on the
     # server thread, so concurrent worker calls on the same neighbour
     # IItemHandler cannot race.
-    # Note: the owner is written with dots here because the script normalizes
-    # javap's slash-separated owners to dots before comparing. The mixin's
-    # @At target itself correctly uses slashes (JVM internal name).
+    # Same dots-vs-slashes note as above.
     ("ClocheEjectorMixin",
      "blusunrize.immersiveengineering.common.blocks.metal.ClocheBlockEntity", "tickServer",
      "()V",
@@ -126,13 +127,25 @@ def split_params(text):
     return parts
 
 
+def strip_comments(text):
+    """Remove // line comments and /* */ block comments from Java source.
+
+    A method-decl regex without this matched parentheticals inside javadoc
+    ("the whole base tick (guard + tickServer)") when the real declaration's
+    generic return type defeated the pattern.
+    """
+    text = re.sub(r"/\*.*?\*/", " ", text, flags=re.S)
+    text = re.sub(r"//[^\n]*", " ", text)
+    return text
+
+
 def handler_signature(mixin_name):
     """(return type, non-Operation param count) of the @WrapOperation handler."""
     root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src", "main", "java")
     for base, _, files in os.walk(root):
         if mixin_name + ".java" in files:
             with open(os.path.join(base, mixin_name + ".java"), encoding="utf-8") as fh:
-                text = fh.read()
+                text = strip_comments(fh.read())
             break
     else:
         return None
@@ -149,11 +162,17 @@ def handler_signature(mixin_name):
             if depth == 0:
                 break
         i += 1
-    decl = re.search(r"([\w\$\.\[\]]+)\s+([\w\$]+)\s*\(([^()]*)\)", text[i + 1:], re.S)
+    # Return type may carry one level of generics (e.g. BlockEntityTicker<BlockEntity>).
+    decl = re.search(r"((?:[\w\$\.\[\]]|<[^<>]*>)+)\s+([\w\$]+)\s*\(([^()]*)\)", text[i + 1:], re.S)
     if not decl:
         return None
     params = [p for p in split_params(decl.group(3)) if not p.startswith("Operation<")]
-    return decl.group(1), len(params)
+    # Normalize the return type to its simple name: the source may write
+    # generics (BlockEntityTicker<BlockEntity>) where the descriptor side
+    # only ever produces the erasure (BlockEntityTicker).
+    ret = decl.group(1)
+    ret = re.sub(r"<.*>", "", ret).rsplit(".", 1)[-1]
+    return ret, len(params)
 
 
 def mixin_annotation_block(mixin_name):
