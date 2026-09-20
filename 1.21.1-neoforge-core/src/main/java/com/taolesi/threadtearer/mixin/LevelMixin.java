@@ -26,6 +26,14 @@ import java.util.Collection;
 /**
  * World mutation APIs. Compute-thread block-entity ticks run interactions live.
  * Ticket writes still go to the interaction FIFO.
+ *
+ * <p>Which injections here actually fire on a server: {@code ServerLevel}
+ * overrides {@code updateNeighborsAt} / {@code updateNeighborsAtExceptFromFacing}
+ * without calling {@code super}, so those two do not; it inherits
+ * {@code blockEntityChanged} and {@code updateNeighbourForOutputSignal}
+ * unchanged, so those two do. That split is why the offloaded-worker
+ * bookkeeping flood comes through the latter pair, and why batching them is
+ * what removes it.
  */
 @Mixin(Level.class)
 public abstract class LevelMixin {
@@ -84,13 +92,12 @@ public abstract class LevelMixin {
         // (the same semantics vanilla worldgen uses), marks the section dirty
         // so vanilla's ChunkHolder sends ONE batched section-update packet
         // per chunk per tick, and defers the neighbour notification to the
-        // tick boundary via NeighborUpdateBatch (deduped). Server-thread
+        // tick boundary via PositionUpdateBatch (deduped). Server-thread
         // callers keep the full immediate vanilla semantics.
         if (InteractionRelocator.isComputing() || InteractionRelocator.isOnTickThread()) {
             com.taolesi.threadtearer.runtime.MCTRuntimeImpl rt =
                     com.taolesi.threadtearer.runtime.MCTRuntimeImpl.get();
             if (rt != null && rt.server() != null && !rt.isServerThread()) {
-                Block block = state.getBlock();
                 rt.runOnServerThread(() -> {
                     if (!self.isLoaded(pos)) {
                         return;
@@ -101,7 +108,12 @@ public abstract class LevelMixin {
                     boolean changed = self.setBlock(pos, state, 0, recursionLeft);
                     if (changed && self instanceof net.minecraft.server.level.ServerLevel serverLevel) {
                         serverLevel.getChunkSource().blockChanged(pos);
-                        com.taolesi.threadtearer.runtime.NeighborUpdateBatch.record(serverLevel, pos, block);
+                        // The chunk marks itself unsaved inside setBlockState,
+                        // so only the neighbour and comparator notifications are
+                        // owed here — and vanilla gates the comparator one on
+                        // the new state carrying an analog signal.
+                        com.taolesi.threadtearer.runtime.PositionUpdateBatch.record(
+                                serverLevel, pos, true, state.hasAnalogOutputSignal(), false);
                     }
                 });
                 cir.setReturnValue(true);
@@ -176,10 +188,23 @@ public abstract class LevelMixin {
         InteractionRelocator.stealAndCancel(ci, () -> self.removeBlockEntity(pos));
     }
 
+    /**
+     * Offloaded workers fold this into {@link PositionUpdateBatch} instead of
+     * queueing a deferred apply task. The body is one line —
+     * {@code chunk.setUnsaved(true)} — and it is emitted by every
+     * {@code BlockEntity.setChanged()}, which Titanium's progress bar calls
+     * unconditionally from {@code serverTick} every tick. As a per-call
+     * deferred task this alone was several thousand no-op applies per tick.
+     */
     @Inject(method = "blockEntityChanged", at = @At("HEAD"), cancellable = true)
     private void threadtearer$blockEntityChanged(BlockPos pos, CallbackInfo ci) {
         Level self = (Level) (Object) this;
         if (self.isClientSide) {
+            return;
+        }
+        if (InteractionRelocator.shouldBatchWorldBookkeeping()) {
+            com.taolesi.threadtearer.runtime.PositionUpdateBatch.record(self, pos, false, false, true);
+            ci.cancel();
             return;
         }
         if (threadtearer$deferredIntoUnloadedChunk(self, pos)) {
@@ -201,6 +226,18 @@ public abstract class LevelMixin {
     /**
      * After the owner places, neighbor notification is a second request:
      * interaction computes, then the owner applies {@code updateNeighborsAt}.
+     *
+     * <p>Offloaded workers fold it into {@link PositionUpdateBatch} — one
+     * notification per position per tick, which is what the batching was
+     * introduced for in the first place.
+     *
+     * <p>Note this injects into {@code Level}'s own body, and
+     * {@code ServerLevel} overrides the method without calling {@code super}
+     * (it goes straight to {@code neighborUpdater}). On a server this injection
+     * therefore does not fire at all; the batching that actually matters is the
+     * explicit {@code PositionUpdateBatch.record(…, notifyNeighbours=true, …)}
+     * in the {@code setBlock} light path above. Kept for any non-{@code
+     * ServerLevel} {@code Level} that does delegate here.
      */
     @Inject(method = "updateNeighborsAt", at = @At("HEAD"), cancellable = true)
     private void threadtearer$neighborUpdate(BlockPos pos, Block block, CallbackInfo ci) {
@@ -208,11 +245,28 @@ public abstract class LevelMixin {
         if (self.isClientSide) {
             return;
         }
+        if (InteractionRelocator.shouldBatchWorldBookkeeping()) {
+            com.taolesi.threadtearer.runtime.PositionUpdateBatch.record(self, pos, true, false, false);
+            ci.cancel();
+            return;
+        }
         if (InteractionRelocator.steal(() -> self.updateNeighborsAt(pos, block))) {
             ci.cancel();
         }
     }
 
+    /**
+     * Deliberately NOT batched. The batch's neighbour flag replays
+     * {@code updateNeighborsAt}, which notifies all six neighbours, whereas
+     * this variant excludes one facing — folding them together would notify a
+     * neighbour vanilla leaves alone.
+     *
+     * <p>Like the method above, this is {@code Level}'s own (empty) body, which
+     * {@code ServerLevel} overrides without calling {@code super}, so on a
+     * server it never fires either. The distinction is preserved rather than
+     * relied on: a future change that routes the real path through here must
+     * not silently gain six-way notification.
+     */
     @Inject(method = "updateNeighborsAtExceptFromFacing", at = @At("HEAD"), cancellable = true)
     private void threadtearer$neighborUpdateExceptFacing(BlockPos pos, Block block, Direction facing, CallbackInfo ci) {
         Level self = (Level) (Object) this;
@@ -256,10 +310,21 @@ public abstract class LevelMixin {
                 () -> self.neighborShapeChanged(direction, queried, pos, offsetPos, flags, recursionLevel));
     }
 
+    /**
+     * Offloaded workers fold this into {@link PositionUpdateBatch}: the
+     * comparator fan-out is idempotent and keyed purely by position, and it is
+     * the other half of every {@code setChanged()} — the {@code block} argument
+     * is re-read at flush time, so a worker's stale value cannot leak through.
+     */
     @Inject(method = "updateNeighbourForOutputSignal", at = @At("HEAD"), cancellable = true)
     private void threadtearer$updateNeighbourForOutputSignal(BlockPos pos, Block block, CallbackInfo ci) {
         Level self = (Level) (Object) this;
         if (self.isClientSide) {
+            return;
+        }
+        if (InteractionRelocator.shouldBatchWorldBookkeeping()) {
+            com.taolesi.threadtearer.runtime.PositionUpdateBatch.record(self, pos, false, true, false);
+            ci.cancel();
             return;
         }
         InteractionRelocator.stealAndCancel(ci, () -> self.updateNeighbourForOutputSignal(pos, block));

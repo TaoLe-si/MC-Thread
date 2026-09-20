@@ -141,7 +141,7 @@ public final class MCTRuntimeImpl implements MCTRuntime {
                     buffer.clear();
                 }
             }
-            if (batch.isEmpty() && NeighborUpdateBatch.isEmpty()) {
+            if (batch.isEmpty() && PositionUpdateBatch.isEmpty()) {
                 return;
             }
             MinecraftServer s = server;
@@ -160,14 +160,14 @@ public final class MCTRuntimeImpl implements MCTRuntime {
                                     .error("Coalesced write failed; continuing with remaining writes", t);
                         }
                     }
-                    // Neighbour updates for this tick's light writes run
-                    // after the writes themselves, deduped, on this same
-                    // server task so ordering is preserved.
+                    // Per-position bookkeeping from this tick's writes and
+                    // offloaded ticks runs after the writes themselves, deduped,
+                    // on this same server task so ordering is preserved.
                     try {
-                        NeighborUpdateBatch.flush();
+                        PositionUpdateBatch.flush();
                     } catch (Throwable t) {
                         org.slf4j.LoggerFactory.getLogger("ThreadTearer.WriteCoalescer")
-                                .error("Neighbour update batch failed", t);
+                                .error("Position update batch failed", t);
                     }
                     com.taolesi.threadtearer.monitor.PhaseTimings.FLUSH_NANOS
                             .add(System.nanoTime() - t0);
@@ -211,6 +211,9 @@ public final class MCTRuntimeImpl implements MCTRuntime {
         this.serverThread = null;
         InteractionRelocator.cacheServerThread(null);
         watchdog.close();
+        // The batch keys on Level instances; without this the map would pin the
+        // dead world for the lifetime of the JVM.
+        PositionUpdateBatch.clear();
         lifecycleExecutor.execute(() -> {
             profiler.detach();
             replay.detach();

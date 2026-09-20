@@ -1,5 +1,69 @@
 # Changelog
 
+## [0.3.10] - 2026-09-20
+
+核心：**修掉服务器线程上那个每 tick 上万次的 apply 洪峰。** 这是一次只动核心、不改任何附属的修复，影响全部 6 个附属的每一台机器。
+
+### 怎么发现的
+
+读监视器日志时看到两个数字对不上：`apply=45979.23ms/8577521`、`flush=49510.57ms/898(10183147 writes, 1608209 deferred)`——900 tick 里约 9500 次 apply/tick，而附属主动 defer 的只有 1781 次/tick。**约 850 万次写不是我们要求延迟的。** 服务器线程 tick 墙钟 146ms，其中排空 55ms（runApply 51ms），占 38%，是服务器线程上最大的一块。
+
+### 先证伪了"重入"
+
+假设是"排空里执行 setBlock 又被 mixin 接住重新入队"（drain → worker → requeue → next drain），那既是性能问题也是"晚两 tick 落地"的正确性隐患。三处查完否掉了：
+
+1. `stealTickAndReturn` 成功时确实 `cir.setReturnValue(speculative)`，原方法被取消，没有双跑。
+2. `relocateTick` 走 `tickExecutor.execute`，是异步的。
+3. **数量对不上**：`queueComputeWorldWrite` 的条目数（11,296/tick 减去附属 defer 的 1,781 = 9,515）与 `APPLY_CALLS`（9,513/tick）几乎 1:1。如果排空期间还有嵌套写被重新入队，APPLY_CALLS 会明显多于 coalescer 条目数。
+
+所以排空期间的嵌套写是内联跑的，没有雪崩。
+
+### 真正的来源：一条被误分类的调用链
+
+每一台带进度条的 Titanium / IF 机器，每 tick 往延迟队列排 2 条写入项，只为标一个布尔 flag：
+
+```
+ActiveTile.serverTick                      无条件 multiProgressBarHandler.update()
+  → ProgressBarComponent.tickBar()
+  → ProgressBarComponent.setProgress()     无条件 componentHarness.markComponentForUpdate(true)
+  → ActiveTile.markComponentDirty()
+  → BlockEntity.setChanged()
+  → Level.blockEntityChanged(pos)               ← 一条
+  → Level.updateNeighbourForOutputSignal(pos)   ← 一条
+```
+
+这两句在 worker 上被 `stealImpl` 的 `ON_COMPUTE` 分支接住：`isWorldStructureWrite()` 的子串表里有 `"blockentitychanged"`，`isFollowUpUpdate()` 里有 `"neighbour"`，于是各排一条 `queueComputeWorldWrite(() -> runApply(name, vanilla))`。问题是 **vanilla 的 `Level.blockEntityChanged` 整个方法体只有一句 `chunk.setUnsaved(true)`**——一个布尔 flag，被当成结构性方块写来延迟。`InventoryComponent.onContentsChanged`、`FluidTankComponent`、`EnergyStorageComponent` 走同一个 `markComponentDirty`，物品/流体/能量每动一次再加 2 条。
+
+### 改了什么
+
+- **新 `PositionUpdateBatch`**（取代 `NeighborUpdateBatch`）：按 `(Level, BlockPos)` 去重，一条记录带三个 OR 合并的 flag——`notifyNeighbours`（`updateNeighborsAt`）、`signal`（比较器扇出）、`unsaved`（`chunk.setUnsaved`）。tick 边界在服务器线程上排一次，9500 条/tick 压到"每台机器每 tick 一条"。
+- **`LevelMixin` 三处入口改走批**：`blockEntityChanged`、`updateNeighbourForOutputSignal`、`updateNeighborsAt`（后者在服务器上其实不触发，见下条）。判定条件是 `InteractionRelocator.shouldBatchWorldBookkeeping()`——必须同时是 compute/tick worker 且不在服务器线程。服务器线程和交互线程的调用语义一字不改。
+- **`updateNeighborsAtExceptFromFacing` 故意不批**：批里的邻居 flag 重放的是 `updateNeighborsAt`（六面全通知），而这个是排除一面的。合并会通知 vanilla 不通知的邻居，所以它保持原样。
+- **一处如实记录下来的"没生效"**：`ServerLevel` 覆写了 `updateNeighborsAt` / `updateNeighborsAtExceptFromFacing` 且**不调 `super`**（直接走 `neighborUpdater`），所以 `LevelMixin` 对这两个方法的注入在服务器上根本不触发。真正起作用的是 `setBlock` 轻写路径里那句显式的 `PositionUpdateBatch.record(…, notifyNeighbours=true, …)`。注入保留（非 `ServerLevel` 的 `Level` 实现若委托过来仍有意义），但 `LevelMixin` 的类 javadoc 把"哪两个注入真的会触发"写清楚了，免得后人照着不触发的那个去调试。`blockEntityChanged` 和 `updateNeighbourForOutputSignal` 是 `ServerLevel` 原样继承的，所以洪峰正是从这一对进来的。
+- **比较器 flag 由调用方决定，不是无条件**：vanilla 自己在两处不一致——`setChanged` 对任何非空气方块都调，`setBlock` 只在**新状态带模拟信号**时才调。所以 setBlock 轻写路径传 `state.hasAnalogOutputSignal()`，`setChanged` 那条路照 vanilla 传 `true`。
+- **`block` 参数在排空时重读**，不从 worker 带过来：worker 算出的值可能已经过了一 tick，而排空那一刻的 live 状态正是 vanilla 在那个瞬间会传的。
+- **`Level.blockEntityChanged` 的 `isLoaded` 守卫移到排空里**（`PositionUpdateBatch.flush` 对每个位置重查），和已有的 `setBlock` 排空守卫同一套语义：位置在 worker 决策和排空之间卸载了就跳过，而不是让服务器线程同步加载区块。
+- **`PhaseTimings` 新增 `POSITION_UPDATES`**：原始 record 次数。与 `NEIGHBOR_POSITIONS`（实际排空的位置数）相除就是压缩比，用来在游戏里直接验证这次改动有没有生效。
+
+### 顺手修掉的两个陈旧物
+
+- **gametest 结构文件放错目录**：文件在 `data/threadtearer/structures/empty.nbt`，而 1.21.1 的 `StructureTemplateManager` 读的是 `structure`（单数，`FileToIdConverter("structure", ".nbt")`）。所以整个 gametest 服是崩的——`IllegalStateException: Missing test structure: threadtearer:empty`。移正之后 7 个用例全部真跑起来。
+- **`offloadMixinInterceptsUseItemOn` 断言的是错的行为**。它断言 mixin 会把 `ServerPlayerGameMode.useItemOn` 搬到交互线程并返回 `SUCCESS`；真跑起来 vanilla 返回 `PASS`、什么都没卸载。原因不是 bug 而是设计：被卸载的玩家交互路径在**包处理层**（`ServerGamePacketListenerImpl`），走到 `ServerPlayerGameMode` 时调用者已经是服务器线程顶层调用，`stealImpl` 的第一道闸门（就是挡住看门狗在区块加载期抓到服务器线程做 `StackWalker` 的那道）**故意**放它内联。用例改名为 `directServerThreadUseItemOnStaysInline`，断言反过来钉住这道闸门，免得后人把它"修掉"。放进独立 batch，因为 `APPLY_CALLS`/`applied` 是全局计数，同 batch 里其它用例会动它。
+
+### 没做的一件事，和为什么
+
+原本还打算"排空只包一层 `runApply`"（现在每条延迟项各自包一层）。改完上面那条之后**没做**：收益随条目数一起缩水，而它有一个改不掉的风险——统一包一层会让所有条目的 `APPLYING_UPDATE` 变成同一个值，而现在"名字像邻居更新"的条目（`Level.neighborChanged` 等）依赖它为 true 才会把嵌套的 `neighborChanged` 内联，其它条目会让嵌套的走 FIFO 推后一 tick。把这个语义在全局统一，等于在无法本地验证的地方动红石时序。要做得单独立项、单独测。
+
+### 测试
+
+- 单测 55 项全过（`TickClassificationTest` 加 1 项：`shouldBatchWorldBookkeeping` 在没有 runtime 的测试 JVM 里必须答 false）。
+- gametest 7 项全过，含新增 `computeWorldBookkeepingLandsThroughTheBatch`：worker 上调 `blockEntityChanged` → 记录数增加、chunk 变 unsaved、`APPLY_CALLS` 不增加（即没走 runApply）。
+- `verify_mixin_packages.py` 闸门过。
+
+### 还没验证的
+
+**收益幅度要进游戏看。** 预期是 `phases[...]` 里的 `apply` 从 ~9500/tick 掉到千级以下、`nb=` 后面的括号里出现 `(N recorded)` 且 N 远大于排空位置数。如果 `apply` 没降，说明洪峰还有第二个来源没找到。
+
 ## [0.3.9] - 2026-09-19
 
 附属 threadtearer-mek：**两个 heater 搬上计算线程。** 这是 0.3.5（多方块族）和 0.3.6（发电机族）之后第三个被搬的族，也是第一个非 void 返回被 defer 的族。为它引入了 Mekanism 编译期依赖——之前 `@Pseudo` + 无 dep 是规则，现在为了 `HeatAPI.HeatTransfer` 这一种返回类型破例。

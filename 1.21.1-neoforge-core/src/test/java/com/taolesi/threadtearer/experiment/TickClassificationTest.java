@@ -49,4 +49,17 @@ class TickClassificationTest {
         assertFalse(InteractionRelocator.isBlockEntityTick(
                 "TileEntityElectricMachine.handler$zdh000$mek$relocateOnUpdateServer"));
     }
+
+    /**
+     * The world-bookkeeping batch must only ever swallow calls made by an
+     * offloaded worker. A server-thread caller — including one inside an apply
+     * — must keep vanilla's immediate semantics, and so must the interaction
+     * thread. In this unit-test JVM there is no runtime at all, so the gate
+     * must answer {@code false} rather than assume a batch exists.
+     */
+    @Test
+    void worldBookkeepingIsOnlyBatchedForOffloadedWorkers() {
+        assertFalse(InteractionRelocator.shouldBatchWorldBookkeeping(),
+                "no compute/tick thread is marked here, so nothing may be batched");
+    }
 }

@@ -68,6 +68,38 @@ public final class InteractionRelocator {
         return APPLY_DEPTH.get() > 0 || ON_INTERACTION.get() || ON_TICK.get() || ON_COMPUTE.get();
     }
 
+    /**
+     * True when the caller is an offloaded compute / tick worker whose
+     * world bookkeeping should be folded into the tick-boundary batch
+     * ({@code PositionUpdateBatch}) instead of becoming its own deferred apply
+     * task.
+     *
+     * <p>Only for calls that are idempotent and keyed purely by position — the
+     * neighbour notification, the comparator fan-out and the chunk-unsaved
+     * flag. A vanilla {@code setChanged()} emits two of the three, and Titanium
+     * emits a {@code setChanged()} from its progress bar every tick, so
+     * queueing them individually put thousands of no-op apply tasks on the
+     * server thread per tick.
+     *
+     * <p>Deliberately narrower than "the caller is off-thread": the methods that
+     * need real ordering or real arguments (block writes, block-entity add /
+     * remove, events) keep going through the coalescer and the interaction FIFO.
+     *
+     * <p>No {@code MCThreadConfig} gate here on purpose. This is only reachable
+     * with a compute / tick worker already marked, and those markers are set
+     * exclusively by the offload machinery — so with offloading off there is
+     * nothing to batch. {@code LevelMixin}'s compute light-write path makes the
+     * same call, and reading the config would also drag NeoForge's config spec
+     * into the unit-test JVM.
+     */
+    public static boolean shouldBatchWorldBookkeeping() {
+        if (!ON_COMPUTE.get() && !ON_TICK.get()) {
+            return false;
+        }
+        MCTRuntimeImpl rt = MCTRuntimeImpl.get();
+        return rt != null && rt.server() != null && !rt.isServerThread();
+    }
+
     public static void enterInteractionThread() {
         ON_INTERACTION.set(true);
     }

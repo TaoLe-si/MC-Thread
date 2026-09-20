@@ -35,9 +35,20 @@ public final class PhaseTimings {
      */
     public static final LongAdder DEFER_CALLS = new LongAdder();
 
-    /** {@code NeighborUpdateBatch.flush} — deferred neighbour notifications. */
+    /**
+     * {@code PositionUpdateBatch.flush} — positions whose deferred neighbour /
+     * comparator / unsaved bookkeeping ran at the tick boundary.
+     */
     public static final LongAdder NEIGHBOR_POSITIONS = new LongAdder();
     public static final LongAdder NEIGHBOR_NANOS = new LongAdder();
+
+    /**
+     * Raw {@code PositionUpdateBatch.record} calls, i.e. bookkeeping a compute
+     * worker asked for. Divided by {@link #NEIGHBOR_POSITIONS} this is the
+     * collapse ratio: a loaded Titanium base asked for ~7 per offloaded tick
+     * before the batch existed, and each one was its own deferred apply task.
+     */
+    public static final LongAdder POSITION_UPDATES = new LongAdder();
 
     /**
      * Time a thread spends BLOCKED waiting for a per-BE lock. A large value
@@ -62,23 +73,26 @@ public final class PhaseTimings {
         long fw = FLUSH_WRITES.sumThenReset();
         long np = NEIGHBOR_POSITIONS.sumThenReset();
         long nn = NEIGHBOR_NANOS.sumThenReset();
+        long pu = POSITION_UPDATES.sumThenReset();
         long lw = LOCK_WAITS.sumThenReset();
         long ln = LOCK_WAIT_NANOS.sumThenReset();
         long dc = DEFER_CALLS.sumThenReset();
         return String.format(
-                "phases[ms/calls] steal=%.2f/%d apply=%.2f/%d flush=%.2f/%d(%d writes, %d deferred) nb=%.2f/%d lockwait=%.2f/%d",
-                ms(sn), sc, ms(an), ac, ms(fn), fc, fw, dc, ms(nn), np, ms(ln), lw);
+                "phases[ms/calls] steal=%.2f/%d apply=%.2f/%d flush=%.2f/%d(%d writes, %d deferred)"
+                        + " nb=%.2f/%d(%d recorded) lockwait=%.2f/%d",
+                ms(sn), sc, ms(an), ac, ms(fn), fc, fw, dc, ms(nn), np, pu, ms(ln), lw);
     }
 
     /** Same numbers, but without resetting (for logging alongside a drain). */
     public static String peekAndFormat() {
         return String.format(
-                "phases[ms/calls] steal=%.2f/%d apply=%.2f/%d flush=%.2f/%d(%d writes, %d deferred) nb=%.2f/%d lockwait=%.2f/%d",
+                "phases[ms/calls] steal=%.2f/%d apply=%.2f/%d flush=%.2f/%d(%d writes, %d deferred)"
+                        + " nb=%.2f/%d(%d recorded) lockwait=%.2f/%d",
                 ms(STEAL_NANOS.sum()), STEAL_CALLS.sum(),
                 ms(APPLY_NANOS.sum()), APPLY_CALLS.sum(),
                 ms(FLUSH_NANOS.sum()), FLUSH_CALLS.sum(),
                 FLUSH_WRITES.sum(), DEFER_CALLS.sum(),
-                ms(NEIGHBOR_NANOS.sum()), NEIGHBOR_POSITIONS.sum(),
+                ms(NEIGHBOR_NANOS.sum()), NEIGHBOR_POSITIONS.sum(), POSITION_UPDATES.sum(),
                 ms(LOCK_WAIT_NANOS.sum()), LOCK_WAITS.sum());
     }
 

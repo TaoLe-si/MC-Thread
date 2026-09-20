@@ -6,6 +6,7 @@ import com.taolesi.threadtearer.api.MCTRuntime;
 import com.taolesi.threadtearer.api.Snapshot;
 import com.taolesi.threadtearer.api.Transaction;
 import com.taolesi.threadtearer.config.MCThreadConfig;
+import com.taolesi.threadtearer.monitor.PhaseTimings;
 import com.taolesi.threadtearer.runtime.MCTRuntimeImpl;
 import com.mojang.authlib.GameProfile;
 import net.minecraft.core.BlockPos;
@@ -118,8 +119,31 @@ public final class MCTGameTests {
         });
     }
 
-    @GameTest(template = "empty", batch = "threadtearer.offload", timeoutTicks = 300)
-    public static void offloadMixinInterceptsUseItemOn(final GameTestHelper helper) {
+    /**
+     * A direct {@code gameMode} call from the server thread stays inline.
+     *
+     * <p>This replaces an earlier version that asserted the opposite — that the
+     * mixin would relocate the call and return {@code SUCCESS} — and that had
+     * not actually executed since the 1.21.1 port, because the gametest
+     * structure folder is {@code data/<ns>/structure/} here and the file sat in
+     * {@code structures/}. Run against the current core it fails immediately:
+     * vanilla answers {@code PASS} and nothing is offloaded.
+     *
+     * <p>The reason is the design, not a bug: the offloaded player-use path is
+     * the packet handler ({@code ServerGamePacketListenerImpl}), which runs
+     * before this. By the time {@code ServerPlayerGameMode.useItemOn} is
+     * reached, the caller is a top-level server-thread one, and
+     * {@code stealImpl}'s first gate deliberately leaves those alone — that is
+     * the gate that stopped the watchdog catching the server thread inside a
+     * {@code StackWalker} walk during chunk load. Pinned here so the gate is
+     * not "fixed" away by a future reader.
+     *
+     * <p>Own batch: the {@code applied} counter is global, and the other tests
+     * in the offload batch increment it from their own offloaded work, which
+     * would make "nothing was applied" untestable.
+     */
+    @GameTest(template = "empty", batch = "threadtearer.serverthreadgate", timeoutTicks = 300)
+    public static void directServerThreadUseItemOnStaysInline(final GameTestHelper helper) {
         boolean previous = MCThreadConfig.offloadPlayerUseItem;
         MCThreadConfig.offloadPlayerUseItem = true;
         helper.setBlock(BlockPos.ZERO, Blocks.DIRT);
@@ -132,12 +156,11 @@ public final class MCTGameTests {
         BlockHitResult hit = new BlockHitResult(Vec3.atCenterOf(abs), Direction.UP, abs, false);
         InteractionResult result = player.gameMode.useItemOn(
                 player, helper.getLevel(), hoe, InteractionHand.MAIN_HAND, hit);
-        helper.assertTrue(result == InteractionResult.SUCCESS, "mixin should return SUCCESS, got " + result);
-        helper.succeedWhen(() -> {
-            helper.assertTrue(MCTRuntimeImpl.get().interactionOffload().stats().applied() > appliedBefore,
-                    "mixin path must increment applied (vanilla till would not)");
-            MCThreadConfig.offloadPlayerUseItem = previous;
-        });
+        helper.assertTrue(result != null, "vanilla must answer the call");
+        MCThreadConfig.offloadPlayerUseItem = previous;
+        helper.succeedWhen(() -> helper.assertTrue(
+                MCTRuntimeImpl.get().interactionOffload().stats().applied() == appliedBefore,
+                "a server-thread top-level useItemOn must run inline, not through the offload FIFO"));
     }
 
     @GameTest(template = "empty", batch = "threadtearer.offload", timeoutTicks = 300)
@@ -157,6 +180,42 @@ public final class MCTGameTests {
             helper.assertTrue(MCTRuntimeImpl.get().interactionOffload().stats().applied() > appliedBefore,
                     "chest OPEN must go through the offload pipeline");
             MCThreadConfig.offloadPlayerUseItem = previous;
+        });
+    }
+
+    /**
+     * The bookkeeping batch must actually land. A compute worker asks for
+     * {@code blockEntityChanged} — the call Titanium's progress bar makes
+     * thousands of times per tick — and the chunk must come out unsaved once
+     * the tick-boundary flush has run, with no apply task per call.
+     *
+     * <p>Own batch: {@code APPLY_CALLS} is global, and the other offload tests
+     * legitimately drive {@code runApply} from their own work, which would make
+     * "no apply was needed" untestable.
+     */
+    @GameTest(template = "empty", batch = "threadtearer.bookkeeping", timeoutTicks = 300)
+    public static void computeWorldBookkeepingLandsThroughTheBatch(final GameTestHelper helper) {
+        final MCTRuntime rt = MCT.runtime();
+        final BlockPos abs = helper.absolutePos(BlockPos.ZERO);
+        helper.setBlock(BlockPos.ZERO, Blocks.STONE);
+        long recordedBefore = PhaseTimings.POSITION_UPDATES.sum();
+        long appliesBefore = PhaseTimings.APPLY_CALLS.sum();
+        // helper.setBlock marked the chunk unsaved; clear it so the assertion
+        // below can only be satisfied by our own flush.
+        helper.getLevel().getChunkAt(abs).setUnsaved(false);
+
+        rt.submitCompute(() -> {
+            helper.getLevel().blockEntityChanged(abs);
+            return null;
+        }).join();
+
+        helper.succeedWhen(() -> {
+            helper.assertTrue(PhaseTimings.POSITION_UPDATES.sum() > recordedBefore,
+                    "a compute-thread blockEntityChanged must be recorded in the batch");
+            helper.assertTrue(helper.getLevel().getChunkAt(abs).isUnsaved(),
+                    "the batch flush must mark the chunk unsaved");
+            helper.assertTrue(PhaseTimings.APPLY_CALLS.sum() == appliesBefore,
+                    "batched bookkeeping must not go through runApply");
         });
     }
 }
