@@ -1,5 +1,58 @@
 # Changelog
 
+## [0.3.11] - 2026-09-20
+
+核心：**删掉计算池里那套手工扩容机制。** 它每派发一个任务就在服务器线程上抢四次池锁，而任务本身在 worker 上只跑 34µs。这一版把派发路径变成无锁，服务器线程省下约 10ms/tick。
+
+### 怎么发现的
+
+读游戏日志的 profiler 归属（`threadtearer/bench-*.json`，1853 采样 / 224 tick）：**threadtearer 占服务器线程 30.9% = 16.15ms/tick**，比第二名的 minecraft（26.7%）还高。热点帧的前两名：
+
+```
+ComputePool$ScalingQueue.offer     224 采样  →  6.3 ms/tick
+ComputePool.adjustForLoad          154 采样  →  4.3 ms/tick
+```
+
+合计 10.6ms，占 52ms 服务器 tick 的 20%。同一份日志的监视器行给出对照：`computeTicks=1796 ... 34.3µs/task workers=15 parallel=0.485x`——**每个任务在 worker 上只花 34µs，服务器线程却要花约 6µs 才能把它递出去**，而且 15 个 worker 只有半个核在忙。生产者喂不快消费者，不是池子不够大。
+
+### 原因
+
+`ComputePool.asComputeExecutor()` 的 lambda 第一句是 `adjustForLoad()`，**它在服务器线程上跑**（`stealTick` 由 vanilla tick 循环触发）：
+
+```java
+void adjustForLoad() {
+    int load = executor.getQueue().size()      // LinkedBlockingQueue.size() 拿两把锁
+             + executor.getActiveCount() + 1;  // mainLock + 遍历所有 worker
+    ...
+    if (target != executor.getCorePoolSize()) {
+        executor.setCorePoolSize(target);       // mainLock，缩容时还会中断空闲 worker
+    }
+}
+```
+
+再加上 `ScalingQueue.offer` 里的 `getPoolSize()`（又是一次 mainLock）。1796 次/tick × 每次 4 次加锁 ≈ 7200 次锁操作/tick，全压在服务器线程上。
+
+### 改法
+
+`corePoolSize` 直接设成 `maxPoolSize`，队列换成普通 `LinkedBlockingQueue`，删掉 `ScalingQueue` / `enqueueOnReject` / `adjustForLoad`。这样 `ThreadPoolExecutor.execute()` 的路径变成：
+
+```java
+if (workerCountOf(c) < corePoolSize) { if (addWorker(command, true)) return; }
+```
+
+每来一个任务加一个 worker 直到 max——**和 `ScalingQueue` 想要的效果完全一样**，但只需读一次 `c`（`ctl` 是单个 AtomicInteger，`workerCountOf` 是纯位运算），不碰任何锁。任务满了之后无界队列自然接管，`offer` 永远成功，所以拒绝处理器也不需要了。
+
+净删代码。`ComputePoolTest` 那两个"4 个并发任务要用 4 个 worker"的断言在新实现下依然成立（`workerCountOf < corePoolSize` 逐任务加线程），另加一条 `coreSizeEqualsMaxSoSubmissionNeverWalksTheWorkerList` 钉住这个不变量——谁把手工扩容加回来，这条会红。
+
+### 没做的一件事
+
+`isWorldAccessorThread` 在热点里占 53 采样（约 1.5ms/tick），它每次要读 4 个 `ThreadLocal`，被 `LevelMixin` 的 `@Redirect(method = "*")` 和 `ServerChunkCacheMixin` 反复调用。合成一个位掩码 `ThreadLocal<Integer>` 就能省掉，但收益比上面小一个数量级，等这一版测完再看。
+
+### 两个会误导人的读数（记下来免得再被绕进去）
+
+- **`computeActive=` 永远是 0，不代表池子没在用。** 它是 `computePool.activeWorkers()`，由 lifecycle 线程在 tick 末尾采样——那时这一 tick 的突发早跑完了。采样点没信息量，不是坏了。该看的是 `parallel=` 和 `busiest=`。
+- **`optimizations.capabilityCache` 是个死开关。** 它在 `MCThreadConfig` 里声明了，但全仓库零引用（配置注释也写了：NeoForge 1.21.1 上能力不再存在 `CapabilityProvider` 上）。别以为开着它在做什么。
+
 ## [0.3.10] - 2026-09-20
 
 核心：**修掉服务器线程上那个每 tick 上万次的 apply 洪峰。** 这是一次只动核心、不改任何附属的修复，影响全部 6 个附属的每一台机器。

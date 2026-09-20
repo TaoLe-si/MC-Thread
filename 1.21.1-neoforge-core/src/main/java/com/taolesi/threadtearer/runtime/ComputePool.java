@@ -7,7 +7,6 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.Executor;
 import java.util.concurrent.LinkedBlockingQueue;
-import java.util.concurrent.RejectedExecutionHandler;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
@@ -15,8 +14,22 @@ import java.util.concurrent.atomic.AtomicLong;
 /**
  * Compute pool for block-entity ticks and adapters.
  *
- * <p>Grows to {@code max} workers as soon as tasks arrive in parallel, then
- * queues. Idle workers time out. Live world writes still go to interaction.
+ * <p>Every task spawns a worker until {@code max} are live, then tasks queue.
+ * Idle workers time out. Live world writes still go to interaction.
+ *
+ * <p><b>The dispatch path is deliberately lock-free.</b> {@code corePoolSize}
+ * equals {@code maxPoolSize}, so {@link ThreadPoolExecutor#execute} answers
+ * "start a worker or queue it" by reading the packed {@code ctl} field — no
+ * lock, no worker-list walk. An earlier version instead kept one core thread
+ * and hand-rolled the growth: a queue whose {@code offer} returned false while
+ * the pool could still grow, plus an {@code adjustForLoad()} that read
+ * {@code getQueue().size()}, {@code getActiveCount()} and
+ * {@code setCorePoolSize()} on every submission. Both of those take the pool's
+ * {@code mainLock} and walk every worker. Measured with the profiler, that pair
+ * was the server thread's top two frames — {@code ScalingQueue.offer} at
+ * 6.3 ms/tick and {@code adjustForLoad} at 4.3 ms/tick, ~20% of a 52 ms tick —
+ * to hand out tasks that then cost 34 µs each on a worker. Reaching the same
+ * worker count through the executor's own counter removed all of it.
  */
 public final class ComputePool implements AutoCloseable {
 
@@ -32,14 +45,16 @@ public final class ComputePool implements AutoCloseable {
         int max = threadCount <= 0
                 ? Math.max(1, Runtime.getRuntime().availableProcessors() - 1)
                 : threadCount;
-        ScalingQueue queue = new ScalingQueue();
+        // core == max on purpose; see the class javadoc. An unbounded queue
+        // would normally make maxPoolSize unreachable (the executor only grows
+        // past core when offer fails), but core is already max, so the worker
+        // count is decided by workerCountOf(ctl) and the queue only ever holds
+        // tasks when every worker is busy.
         this.executor = new ThreadPoolExecutor(
-                1, max, 60L, TimeUnit.SECONDS,
-                queue,
-                new NamedDaemonThreadFactory("MCT-Compute"),
-                enqueueOnReject());
+                max, max, 60L, TimeUnit.SECONDS,
+                new LinkedBlockingQueue<>(),
+                new NamedDaemonThreadFactory("MCT-Compute"));
         this.executor.allowCoreThreadTimeOut(true);
-        queue.attach(this.executor);
     }
 
     public <T> CompletableFuture<T> submit(ComputeTask<T> task) {
@@ -54,6 +69,16 @@ public final class ComputePool implements AutoCloseable {
 
     public int poolSize() {
         return executor.getMaximumPoolSize();
+    }
+
+    /**
+     * The executor's core size, which must equal {@link #poolSize()}: that
+     * equality is what keeps {@code execute} on the lock-free
+     * {@code workerCountOf(ctl)} branch instead of the queue, and it is the
+     * whole point of the class javadoc. Package-private so a test can pin it.
+     */
+    int coreSize() {
+        return executor.getCorePoolSize();
     }
 
     public int liveWorkers() {
@@ -85,26 +110,23 @@ public final class ComputePool implements AutoCloseable {
     }
 
     /**
-     * Block-entity compute: marks the worker and grows toward every core
-     * when many tickers are in flight.
+     * Block-entity compute: marks the worker so its world writes are
+     * recognised, and collects the per-worker statistics the monitor reads.
      */
     public Executor asComputeExecutor() {
-        return command -> {
-            adjustForLoad();
-            executor.execute(() -> {
-                long t0 = System.nanoTime();
-                InteractionRelocator.enterCompute();
-                try {
-                    command.run();
-                    completedTicks.incrementAndGet();
-                } finally {
-                    InteractionRelocator.leaveCompute();
-                    cpuNanos.addAndGet(System.nanoTime() - t0);
-                    perWorker.computeIfAbsent(Thread.currentThread().getName(),
-                            k -> new java.util.concurrent.atomic.LongAdder()).increment();
-                }
-            });
-        };
+        return command -> executor.execute(() -> {
+            long t0 = System.nanoTime();
+            InteractionRelocator.enterCompute();
+            try {
+                command.run();
+                completedTicks.incrementAndGet();
+            } finally {
+                InteractionRelocator.leaveCompute();
+                cpuNanos.addAndGet(System.nanoTime() - t0);
+                perWorker.computeIfAbsent(Thread.currentThread().getName(),
+                        k -> new java.util.concurrent.atomic.LongAdder()).increment();
+            }
+        });
     }
 
     /**
@@ -136,52 +158,8 @@ public final class ComputePool implements AutoCloseable {
         return new Stats(tasks, cpuNanos.getAndSet(0), workers, (int) busiest);
     }
 
-    void adjustForLoad() {
-        int load = executor.getQueue().size() + executor.getActiveCount() + 1;
-        int max = executor.getMaximumPoolSize();
-        int target = Math.min(max, Math.max(1, load));
-        if (target != executor.getCorePoolSize()) {
-            executor.setCorePoolSize(target);
-        }
-    }
-
     @Override
     public void close() {
         executor.shutdownNow();
-    }
-
-    private static RejectedExecutionHandler enqueueOnReject() {
-        return (runnable, pool) -> {
-            if (pool.isShutdown()) {
-                throw new java.util.concurrent.RejectedExecutionException();
-            }
-            ((ScalingQueue) pool.getQueue()).enqueue(runnable);
-        };
-    }
-
-    /**
-     * Refuse the queue while the pool can still grow so {@code execute}
-     * creates another worker. After {@code max}, tasks wait in the queue.
-     */
-    private static final class ScalingQueue extends LinkedBlockingQueue<Runnable> {
-
-        private volatile ThreadPoolExecutor pool;
-
-        void attach(ThreadPoolExecutor pool) {
-            this.pool = pool;
-        }
-
-        void enqueue(Runnable runnable) {
-            super.offer(runnable);
-        }
-
-        @Override
-        public boolean offer(Runnable runnable) {
-            ThreadPoolExecutor p = this.pool;
-            if (p != null && p.getPoolSize() < p.getMaximumPoolSize()) {
-                return false;
-            }
-            return super.offer(runnable);
-        }
     }
 }

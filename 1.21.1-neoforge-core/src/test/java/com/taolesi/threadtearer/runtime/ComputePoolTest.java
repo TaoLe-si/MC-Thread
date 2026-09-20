@@ -9,6 +9,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -49,6 +50,25 @@ class ComputePoolTest {
             }).get(5, TimeUnit.SECONDS);
             assertTrue(name.get().startsWith("MCT-Compute-"), "unexpected thread name: " + name.get());
             assertTrue(daemon.get(), "compute threads must be daemon");
+        }
+    }
+
+    /**
+     * Pins the property that makes submission cheap: core size equals max size,
+     * so {@link ThreadPoolExecutor#execute} decides "start a worker" from the
+     * packed {@code ctl} counter rather than consulting the queue. The version
+     * that instead started one core thread and grew the pool by hand had to
+     * call {@code getQueue().size()}, {@code getActiveCount()} and
+     * {@code setCorePoolSize()} on every submission — all of which take the
+     * pool's main lock — and that pair was the server thread's top two frames
+     * in the profiler (10.6 ms of a 52 ms tick). Reintroducing a growth
+     * mechanism shows up here.
+     */
+    @Test
+    void coreSizeEqualsMaxSoSubmissionNeverWalksTheWorkerList() {
+        try (ComputePool pool = new ComputePool(4)) {
+            assertEquals(pool.poolSize(), pool.coreSize(),
+                    "core must equal max; otherwise execute() has to check the queue");
         }
     }
 
