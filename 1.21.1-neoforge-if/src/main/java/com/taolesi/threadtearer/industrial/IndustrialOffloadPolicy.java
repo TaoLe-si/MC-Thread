@@ -25,21 +25,36 @@ import java.util.concurrent.ConcurrentHashMap;
  * the server thread for every admitted machine, the same split the Mekanism
  * addon made around {@code TileComponentEjector.tickServer}.
  *
- * <p><b>Route B (this release) — Level-write area work.</b> IF 0.1.0
- * rejected the entire {@code IndustrialAreaWorkingTile} family on a single
- * "AABB scans + block placement + fake-player interaction" verdict. A
- * family-level audit split that verdict in two: machines whose area tick
- * touches <em>only</em> {@code Level.setBlock / Level.setBlockAndUpdate /
- * Level.removeBlock} (already intercepted by the core's
- * {@code LevelMixin} and forwarded to the interaction-thread FIFO when
- * called from a compute worker) plus their own slot/tank work, do in fact
- * fit the worker + interaction-thread split. They join the allowlist
- * alongside the original fourteen; the area machine's own
- * {@code IFacingComponent.work()} still defers to the server thread via
- * {@link IfDeferral}. The remaining twenty-or-so area machines call
- * {@code Entity.hurt / Entity.discard / Level.getEntitiesOfClass}, which are
- * not intercepted by the core and have not been audited safe to call from
- * a worker — they keep running on the server thread.
+ * <p><b>Route B was attempted and reverted.</b> The criterion — an area
+ * machine whose tick touches only {@code Level.setBlock /
+ * Level.setBlockAndUpdate / Level.removeBlock} (auto-forwarded by the
+ * core's {@code LevelMixin}) — is sound, but a full-body read of every
+ * candidate found that <em>none</em> of IF's area machines passes it. The
+ * first pass admitted six on a pattern-count grep and that audit was
+ * wrong; reading the bodies (and the helpers they call) found:
+ * <ul>
+ *   <li><b>{@code BlockUtils.canBlockBeBroken}</b> — used by Block
+ *       Breaker, Fluid Collector and Fluid Placer — builds a cached
+ *       {@code FakePlayer} and posts {@code BlockEvent.BreakEvent} on the
+ *       NeoForge event bus. Protection-mod handlers would run on our
+ *       thread, and the per-owner cached fake player is shared mutable
+ *       entity state.</li>
+ *   <li><b>Shared RNG</b> — Hydroponic Bed (four call sites) and
+ *       Simulated Hydroponic Bed (five) draw from {@code level.random},
+ *       the level-wide {@code RandomSource} the server thread's own random
+ *       ticks use; concurrent draws corrupt both sequences silently.</li>
+ *   <li><b>Third-party interfaces</b> — Plant Sower calls
+ *       {@code SpecialPlantable.spawnPlantAtPosition} and Hydroponic Bed
+ *       calls the {@code PlantRecollectable} registry; both run
+ *       un-audited modded implementations on whatever thread calls them.</li>
+ * </ul>
+ * The lesson is recorded here so the next attempt does not repeat it:
+ * <b>a pattern-count grep is not an audit</b> — helper methods hide fake
+ * players behind innocuous names, and {@code level.random} hides behind
+ * field-chains that a naive {@code "level\."} grep counts but a
+ * signature-only grep misses. Read the {@code work()} body, every method
+ * it calls, and check for shared RNG, fake players, event-bus posts and
+ * third-party interface dispatch.
  *
  * <p><b>What was read, per family:</b>
  * <ul>
@@ -53,12 +68,6 @@ import java.util.concurrent.ConcurrentHashMap;
  *       stacks).</li>
  *   <li><b>Admitted — working machines</b>: Bio Reactor (its {@code work()}
  *       is own tanks and input slots only).</li>
- *   <li><b>Admitted — area machines under route B</b> (Level-write only,
- *       no entity / fake-player API): Block Breaker, Fluid Collector,
- *       Fluid Placer, Plant Sower, Hydroponic Bed (real), Simulated
- *       Hydroponic Bed. Their area tick uses only {@code setBlock} (or its
- *       subclasses) on the cached range; the core's {@code LevelMixin}
- *       defers those to the interaction-thread FIFO automatically.</li>
  *   <li><b>Refused — reads that feed arithmetic.</b> Water Condensator
  *       ({@code getWaterSources()} reads six neighbours' fluid state and the
  *       result sizes the fill), Enchantment Factory and Applicator (drain the
@@ -113,18 +122,7 @@ public final class IndustrialOffloadPolicy {
             "com.buuz135.industrial.block.resourceproduction.tile.PotionBrewerTile",
             "com.buuz135.industrial.block.resourceproduction.tile.ResourcefulFurnaceTile",
             "com.buuz135.industrial.block.resourceproduction.tile.SporesRecreatorTile",
-            "com.buuz135.industrial.block.resourceproduction.tile.WashingFactoryTile",
-            // Route B — area machines whose tick uses only Level.setBlock /
-            // Level.removeBlock (auto-forwarded by core LevelMixin) and own
-            // slot work. Their IFacingComponent.work() still defers to the
-            // server thread via IfDeferral; the area-tick compute runs on
-            // the worker.
-            "com.buuz135.industrial.block.resourceproduction.tile.BlockBreakerTile",
-            "com.buuz135.industrial.block.resourceproduction.tile.FluidCollectorTile",
-            "com.buuz135.industrial.block.resourceproduction.tile.FluidPlacerTile",
-            "com.buuz135.industrial.block.agriculturehusbandry.tile.PlantSowerTile",
-            "com.buuz135.industrial.block.agriculturehusbandry.tile.HydroponicBedTile",
-            "com.buuz135.industrial.block.agriculturehusbandry.tile.SimulatedHydroponicBedTile"
+            "com.buuz135.industrial.block.resourceproduction.tile.WashingFactoryTile"
     );
 
     /**
