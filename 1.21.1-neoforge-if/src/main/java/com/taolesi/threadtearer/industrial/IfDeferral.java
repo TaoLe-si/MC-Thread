@@ -53,4 +53,18 @@ public final class IfDeferral {
         MCT.runtime().deferWorldWrite(() -> InteractionRelocator.runLockedBlockEntityTick(lock, () -> op.call(args)));
         return false;
     }
+
+    /**
+     * The void-returning twin of {@link #runOrDefer}, for wrapped calls whose
+     * result the caller discards (bonemeal, random-tick bursts, progress-bar
+     * pushes). Same deferral shape: the body runs on the server thread at the
+     * tick boundary, under {@code lock}'s per-BE lock.
+     */
+    public static void runOrDeferVoid(Object lock, Runnable body) {
+        if (!InteractionRelocator.isComputing()) {
+            body.run();
+            return;
+        }
+        MCT.runtime().deferWorldWrite(() -> InteractionRelocator.runLockedBlockEntityTick(lock, body));
+    }
 }

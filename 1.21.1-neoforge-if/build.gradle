@@ -62,6 +62,15 @@ dependencies {
     // installed. The path is set in gradle.properties (if_compile_jar).
     compileOnly files(if_compile_jar)
 
+    // Titanium jar (IF's framework) used as compileOnly so
+    // LaserDrillDeferralMixin can call
+    // ProgressBarComponent.getComponentHarness() to take the LaserBase as
+    // its deferral lock. Same loosening the mek addon made for its heater
+    // mixins: compile-time reference, runtime presence guaranteed by the
+    // policy gate (the mixin only applies when IF — and with it Titanium —
+    // is installed).
+    compileOnly files(titanium_compile_jar)
+
     testImplementation 'org.junit.jupiter:junit-jupiter:5.10.2'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 }

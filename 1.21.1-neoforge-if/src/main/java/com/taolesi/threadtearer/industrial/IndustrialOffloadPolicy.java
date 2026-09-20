@@ -25,36 +25,59 @@ import java.util.concurrent.ConcurrentHashMap;
  * the server thread for every admitted machine, the same split the Mekanism
  * addon made around {@code TileComponentEjector.tickServer}.
  *
- * <p><b>Route B was attempted and reverted.</b> The criterion — an area
- * machine whose tick touches only {@code Level.setBlock /
- * Level.setBlockAndUpdate / Level.removeBlock} (auto-forwarded by the
- * core's {@code LevelMixin}) — is sound, but a full-body read of every
- * candidate found that <em>none</em> of IF's area machines passes it. The
- * first pass admitted six on a pattern-count grep and that audit was
- * wrong; reading the bodies (and the helpers they call) found:
+ * <p><b>Route B, second attempt — per-call-site defer.</b> The first
+ * attempt admitted six area machines on a pattern-count grep and was
+ * reverted: reading the bodies (and every helper they call) found fake
+ * players behind {@code BlockUtils.canBlockBeBroken}, shared
+ * {@code level.random} draws, and third-party interface dispatch — none
+ * of which a "only Level-write APIs" criterion can see. The corrected
+ * criterion is not about which APIs the tick touches, but about whether
+ * <b>every server-thread-only action call in the work() body has a
+ * wrap-able call site</b> that a dedicated deferral mixin can hand to the
+ * tick-boundary batch. Under that criterion two machines qualify:
  * <ul>
- *   <li><b>{@code BlockUtils.canBlockBeBroken}</b> — used by Block
- *       Breaker, Fluid Collector and Fluid Placer — builds a cached
- *       {@code FakePlayer} and posts {@code BlockEvent.BreakEvent} on the
- *       NeoForge event bus. Protection-mod handlers would run on our
- *       thread, and the per-owner cached fake player is shared mutable
- *       entity state.</li>
- *   <li><b>Shared RNG</b> — Hydroponic Bed (four call sites) and
- *       Simulated Hydroponic Bed (five) draw from {@code level.random},
- *       the level-wide {@code RandomSource} the server thread's own random
- *       ticks use; concurrent draws corrupt both sequences silently.</li>
- *   <li><b>Third-party interfaces</b> — Plant Sower calls
- *       {@code SpecialPlantable.spawnPlantAtPosition} and Hydroponic Bed
- *       calls the {@code PlantRecollectable} registry; both run
- *       un-audited modded implementations on whatever thread calls them.</li>
+ *   <li><b>Hydroponic Bed</b> — {@code work()} branches on live reads
+ *       (worker-legal) and then calls {@code performBonemeal} (×1),
+ *       {@code BlockState.randomTick} (×3) and
+ *       {@code tryToHarvestAndReplant} (×2). All six call sites are
+ *       wrapped by {@code HydroponicBedDeferralMixin}: on a worker they
+ *       defer to the server-thread batch (under the bed's per-BE lock,
+ *       with a re-read guard against the crop being gone by drain time),
+ *       which is what makes the shared {@code level.random} draws, the
+ *       particle events and the third-party {@code PlantRecollectable}
+ *       registry safe — they execute on the server thread. The harvest
+ *       call's boolean result cannot cross back, so the wrapper returns
+ *       optimistic {@code true} (skip the growth fallback; the next tick
+ *       re-evaluates from fresh reads).</li>
+ *   <li><b>Laser Drill</b> — {@code work()} finds its target by reading
+ *       block entities (worker-legal) and writes exactly one thing: the
+ *       target LaserBase's progress bar ({@code setProgress} +
+ *       {@code tickBar}). Both call sites are wrapped by
+ *       {@code LaserDrillDeferralMixin} and deferred under the
+ *       <b>LaserBase's</b> per-BE lock ({@code getComponentHarness()}).
+ *       The base is passive ({@code setProgressIncrease(0)}, the drill is
+ *       the sole bar writer), so the lock fully serialises it. The extra
+ *       win: the base's heavy {@code onWork()} chain (recipe scans,
+ *       rarity filters, entity scans/damage for the fluid variant) only
+ *       ever runs from {@code tickBar()}, so it leaves the server tick
+ *       with the drill.</li>
  * </ul>
- * The lesson is recorded here so the next attempt does not repeat it:
- * <b>a pattern-count grep is not an audit</b> — helper methods hide fake
- * players behind innocuous names, and {@code level.random} hides behind
- * field-chains that a naive {@code "level\."} grep counts but a
- * signature-only grep misses. Read the {@code work()} body, every method
- * it calls, and check for shared RNG, fake players, event-bus posts and
- * third-party interface dispatch.
+ * The other four first-attempt candidates still fail: Block Breaker /
+ * Fluid Collector / Fluid Placer reach the fake player through
+ * {@code BlockUtils.canBlockBeBroken} inside a conditional whose result
+ * feeds arithmetic (deferring it would mean inventing a verdict);
+ * Simulated Hydroponic Bed draws {@code level.random} five times in its
+ * own decision arithmetic (not an action call — not wrap-able). Plant
+ * Sower's {@code SpecialPlantable.spawnPlantAtPosition} is wrap-able in
+ * principle but its result feeds nothing the caller checks, so it may
+ * qualify in a later release after the same re-read-guard treatment.
+ *
+ * <p><b>The audit lesson from the first attempt, kept so it is not
+ * repeated:</b> a pattern-count grep is not an audit. Helper methods
+ * hide fake players behind innocuous names, and {@code level.random}
+ * hides behind field-chains a signature-only grep misses. Read the
+ * {@code work()} body, every method it calls, and check for shared RNG,
+ * fake players, event-bus posts and third-party interface dispatch.
  *
  * <p><b>What was read, per family:</b>
  * <ul>
@@ -122,7 +145,14 @@ public final class IndustrialOffloadPolicy {
             "com.buuz135.industrial.block.resourceproduction.tile.PotionBrewerTile",
             "com.buuz135.industrial.block.resourceproduction.tile.ResourcefulFurnaceTile",
             "com.buuz135.industrial.block.resourceproduction.tile.SporesRecreatorTile",
-            "com.buuz135.industrial.block.resourceproduction.tile.WashingFactoryTile"
+            "com.buuz135.industrial.block.resourceproduction.tile.WashingFactoryTile",
+            // Route B (per-call-site defer): admitted together with a
+            // dedicated deferral mixin that wraps every server-thread-only
+            // action call in work() and hands it to the tick-boundary batch.
+            // See the class javadoc and HydroponicBedDeferralMixin /
+            // LaserDrillDeferralMixin for the call-site lists.
+            "com.buuz135.industrial.block.agriculturehusbandry.tile.HydroponicBedTile",
+            "com.buuz135.industrial.block.resourceproduction.tile.LaserDrillTile"
     );
 
     /**

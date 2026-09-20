@@ -69,20 +69,27 @@ class IndustrialOffloadPolicyTest {
                 "com.buuz135.industrial.block.resourceproduction.tile.PotionBrewerTile",
                 "com.buuz135.industrial.block.resourceproduction.tile.ResourcefulFurnaceTile",
                 "com.buuz135.industrial.block.resourceproduction.tile.SporesRecreatorTile",
-                "com.buuz135.industrial.block.resourceproduction.tile.WashingFactoryTile"),
+                "com.buuz135.industrial.block.resourceproduction.tile.WashingFactoryTile",
+                // Route B, second attempt — admitted together with their
+                // per-call-site deferral mixins.
+                "com.buuz135.industrial.block.agriculturehusbandry.tile.HydroponicBedTile",
+                "com.buuz135.industrial.block.resourceproduction.tile.LaserDrillTile"),
                 IndustrialOffloadPolicy.allowedClasses());
-        assertEquals(14, IndustrialOffloadPolicy.allowedSize());
+        assertEquals(16, IndustrialOffloadPolicy.allowedSize());
     }
 
     /**
      * The admitted machines, each through its real chain. Processing machines
-     * share one chain shape; the Bio Reactor walks through the working base.
+     * share one chain shape; the Bio Reactor and the Hydroponic Bed walk
+     * through the working base; the Laser Drill walks through the area base.
      */
     @Test
     void admittedMachinesAreOffloadedThroughTheirRealChains() {
         for (String leaf : IndustrialOffloadPolicy.allowedClasses()) {
-            if (leaf.endsWith("BioReactorTile")) {
+            if (leaf.endsWith("BioReactorTile") || leaf.endsWith("HydroponicBedTile")) {
                 assertAllowed(leaf, WORKING, IF_MACHINE, MACHINE, POWERED, ACTIVE, BASIC);
+            } else if (leaf.endsWith("LaserDrillTile")) {
+                assertAllowed(leaf, AREA, WORKING, IF_MACHINE, MACHINE, POWERED, ACTIVE, BASIC);
             } else {
                 assertAllowed(leaf, PROCESSING, IF_MACHINE, MACHINE, POWERED, ACTIVE, BASIC);
             }
@@ -145,15 +152,13 @@ class IndustrialOffloadPolicyTest {
                 AREA, WORKING, IF_MACHINE, MACHINE, POWERED, ACTIVE, BASIC);
         assertRefused("com.buuz135.industrial.block.resourceproduction.tile.MarineFisherTile",
                 AREA, WORKING, IF_MACHINE, MACHINE, POWERED, ACTIVE, BASIC);
-        assertRefused("com.buuz135.industrial.block.resourceproduction.tile.LaserDrillTile",
-                AREA, WORKING, IF_MACHINE, MACHINE, POWERED, ACTIVE, BASIC);
         assertRefused("com.buuz135.industrial.block.resourceproduction.tile.MobDetectorTile",
                 AREA, WORKING, IF_MACHINE, MACHINE, POWERED, ACTIVE, BASIC);
         assertRefused("com.buuz135.industrial.block.agriculturehusbandry.tile.PlantFertilizerTile",
                 AREA, WORKING, IF_MACHINE, MACHINE, POWERED, ACTIVE, BASIC);
-        // The six route-B candidates — admitted once on a grep, refused on
-        // the full-body read (fake player + event bus, level.random,
-        // SpecialPlantable). Pinned so the same grep doesn't re-admit them.
+        // The four route-B first-attempt candidates that still fail —
+        // pinned so the same grep cannot re-admit them without the
+        // per-call-site deferral treatment their bodies require.
         assertRefused("com.buuz135.industrial.block.resourceproduction.tile.BlockBreakerTile",
                 AREA, WORKING, IF_MACHINE, MACHINE, POWERED, ACTIVE, BASIC);
         assertRefused("com.buuz135.industrial.block.resourceproduction.tile.FluidCollectorTile",
@@ -162,8 +167,6 @@ class IndustrialOffloadPolicyTest {
                 AREA, WORKING, IF_MACHINE, MACHINE, POWERED, ACTIVE, BASIC);
         assertRefused("com.buuz135.industrial.block.agriculturehusbandry.tile.PlantSowerTile",
                 AREA, WORKING, IF_MACHINE, MACHINE, POWERED, ACTIVE, BASIC);
-        assertRefused("com.buuz135.industrial.block.agriculturehusbandry.tile.HydroponicBedTile",
-                WORKING, IF_MACHINE, MACHINE, POWERED, ACTIVE, BASIC);
         assertRefused("com.buuz135.industrial.block.agriculturehusbandry.tile.SimulatedHydroponicBedTile",
                 WORKING, IF_MACHINE, MACHINE, POWERED, ACTIVE, BASIC);
         // Generators: six-neighbour energy push, extract feeds receive.

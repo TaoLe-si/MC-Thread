@@ -30,6 +30,7 @@ import zipfile
 MODS = r"E:\MC\.minecraft\versions\NAST hard d0.9.1 beta3\mods"
 JARS = [
     os.path.join(MODS, "titanium-1.21-4.0.45.jar"),
+    os.path.join(MODS, "industrialforegoing-1.21-3.6.39.jar"),
 ]
 
 # (mixin, target class, method name, method descriptor, wrapped owner, wrapped name, wrapped descriptor, ordinal or None)
@@ -62,6 +63,68 @@ CHECKS = [
      "com.hrznstudio.titanium.component.sideness.IFacingComponent", "work",
      "(Lnet/minecraft/world/level/Level;Lnet/minecraft/core/BlockPos;"
      "Lnet/minecraft/core/Direction;I)Z", 1),
+    # HydroponicBed route-B: the bonemeal action (one call site).
+    ("HydroponicBedDeferralMixin",
+     "com.buuz135.industrial.block.agriculturehusbandry.tile.HydroponicBedTile", "work",
+     "()Lcom/buuz135/industrial/block/tile/IndustrialWorkingTile$WorkAction;",
+     "net.minecraft.world.level.block.BonemealableBlock", "performBonemeal",
+     "(Lnet/minecraft/server/level/ServerLevel;Lnet/minecraft/util/RandomSource;"
+     "Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/state/BlockState;)V", 0),
+    # HydroponicBed route-B: the growth bursts (three call sites, wrapped
+    # without ordinal — the gate reports "N of M" and any reordering fails).
+    ("HydroponicBedDeferralMixin",
+     "com.buuz135.industrial.block.agriculturehusbandry.tile.HydroponicBedTile", "work",
+     "()Lcom/buuz135/industrial/block/tile/IndustrialWorkingTile$WorkAction;",
+     "net.minecraft.world.level.block.state.BlockState", "randomTick",
+     "(Lnet/minecraft/server/level/ServerLevel;Lnet/minecraft/core/BlockPos;"
+     "Lnet/minecraft/util/RandomSource;)V", 0),
+    ("HydroponicBedDeferralMixin",
+     "com.buuz135.industrial.block.agriculturehusbandry.tile.HydroponicBedTile", "work",
+     "()Lcom/buuz135/industrial/block/tile/IndustrialWorkingTile$WorkAction;",
+     "net.minecraft.world.level.block.state.BlockState", "randomTick",
+     "(Lnet/minecraft/server/level/ServerLevel;Lnet/minecraft/core/BlockPos;"
+     "Lnet/minecraft/util/RandomSource;)V", 1),
+    ("HydroponicBedDeferralMixin",
+     "com.buuz135.industrial.block.agriculturehusbandry.tile.HydroponicBedTile", "work",
+     "()Lcom/buuz135/industrial/block/tile/IndustrialWorkingTile$WorkAction;",
+     "net.minecraft.world.level.block.state.BlockState", "randomTick",
+     "(Lnet/minecraft/server/level/ServerLevel;Lnet/minecraft/core/BlockPos;"
+     "Lnet/minecraft/util/RandomSource;)V", 2),
+    # HydroponicBed route-B: the harvest (a self-call, so javap prints it
+    # without an owner — the script attributes those to the disassembled
+    # class, which is what the constant pool holds and what the mixin
+    # target must name).
+    ("HydroponicBedDeferralMixin",
+     "com.buuz135.industrial.block.agriculturehusbandry.tile.HydroponicBedTile", "work",
+     "()Lcom/buuz135/industrial/block/tile/IndustrialWorkingTile$WorkAction;",
+     "com.buuz135.industrial.block.agriculturehusbandry.tile.HydroponicBedTile", "tryToHarvestAndReplant",
+     "(Lnet/minecraft/world/level/Level;Lnet/minecraft/core/BlockPos;"
+     "Lnet/minecraft/world/level/block/state/BlockState;"
+     "Lnet/neoforged/neoforge/items/IItemHandler;"
+     "Lcom/hrznstudio/titanium/component/progress/ProgressBarComponent;"
+     "Lcom/buuz135/industrial/block/tile/IndustrialWorkingTile;"
+     "Ljava/util/function/Supplier;Lnet/minecraft/world/item/ItemStack;)Z", 0),
+    ("HydroponicBedDeferralMixin",
+     "com.buuz135.industrial.block.agriculturehusbandry.tile.HydroponicBedTile", "work",
+     "()Lcom/buuz135/industrial/block/tile/IndustrialWorkingTile$WorkAction;",
+     "com.buuz135.industrial.block.agriculturehusbandry.tile.HydroponicBedTile", "tryToHarvestAndReplant",
+     "(Lnet/minecraft/world/level/Level;Lnet/minecraft/core/BlockPos;"
+     "Lnet/minecraft/world/level/block/state/BlockState;"
+     "Lnet/neoforged/neoforge/items/IItemHandler;"
+     "Lcom/hrznstudio/titanium/component/progress/ProgressBarComponent;"
+     "Lcom/buuz135/industrial/block/tile/IndustrialWorkingTile;"
+     "Ljava/util/function/Supplier;Lnet/minecraft/world/item/ItemStack;)Z", 1),
+    # LaserDrill route-B: the two writes to the LaserBase's bar.
+    ("LaserDrillDeferralMixin",
+     "com.buuz135.industrial.block.resourceproduction.tile.LaserDrillTile", "work",
+     "()Lcom/buuz135/industrial/block/tile/IndustrialWorkingTile$WorkAction;",
+     "com.hrznstudio.titanium.component.progress.ProgressBarComponent", "setProgress",
+     "(I)V", 0),
+    ("LaserDrillDeferralMixin",
+     "com.buuz135.industrial.block.resourceproduction.tile.LaserDrillTile", "work",
+     "()Lcom/buuz135/industrial/block/tile/IndustrialWorkingTile$WorkAction;",
+     "com.hrznstudio.titanium.component.progress.ProgressBarComponent", "tickBar",
+     "()V", 0),
 ]
 
 INVOKE_RE = re.compile(
@@ -187,67 +250,109 @@ def split_params(text):
     return parts
 
 
-def handler_signature(mixin_name):
-    """(return type, non-Operation param count) of the @WrapOperation handler."""
+def strip_comments(text):
+    """Remove // line comments and /* */ block comments from Java source.
+
+    Without this, javadoc mentions like "{@code work()}" match the
+    method-declaration pattern and pollute the handler list.
+    """
+    text = re.sub(r"/\*.*?\*/", " ", text, flags=re.S)
+    text = re.sub(r"//[^\n]*", " ", text)
+    return text
+
+
+def mixin_source(mixin_name):
     root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src", "main", "java")
     for base, _, files in os.walk(root):
         if mixin_name + ".java" in files:
             with open(os.path.join(base, mixin_name + ".java"), encoding="utf-8") as fh:
-                text = fh.read()
-            break
-    else:
-        return None
+                return strip_comments(fh.read())
+    return None
 
-    m = WRAP_RE.search(text)
-    if not m:
+
+def handler_signatures(mixin_name):
+    """[(return type, non-Operation param count)] for every @WrapOperation
+    handler in the mixin, in declaration order.
+
+    A route-B mixin wraps several call-site groups, so one signature is not
+    enough — the gate pairs the CHECKS groups (in first-appearance order)
+    with these signatures positionally. Returns None when the file or the
+    annotation is missing.
+    """
+    text = mixin_source(mixin_name)
+    if text is None:
         return None
-    depth, i = 0, m.end() - 1
-    while i < len(text):
-        if text[i] == "(":
-            depth += 1
-        elif text[i] == ")":
-            depth -= 1
-            if depth == 0:
-                break
-        i += 1
-    decl = DECL_RE.search(text[i + 1:])
-    if not decl:
-        return None
-    params = [p for p in split_params(decl.group(3)) if not p.startswith("Operation<")]
-    return decl.group(1), len(params)
+    sigs = []
+    pos = 0
+    while True:
+        m = WRAP_RE.search(text, pos)
+        if not m:
+            break
+        depth, i = 0, m.end() - 1
+        while i < len(text):
+            if text[i] == "(":
+                depth += 1
+            elif text[i] == ")":
+                depth -= 1
+                if depth == 0:
+                    break
+            i += 1
+        decl = DECL_RE.search(text[i + 1:])
+        if not decl:
+            return None
+        params = [p for p in split_params(decl.group(3)) if not p.startswith("Operation<")]
+        sigs.append((decl.group(1), len(params)))
+        pos = i + 1
+    return sigs or None
 
 
 def check_handler_signatures(cache):
-    """The receiver is not optional for an instance call, and the handler
-    return type must be the wrapped method's return type."""
+    """The receiver is not optional for an instance call, and every handler's
+    return type must be its wrapped call's return type.
+
+    CHECKS rows for one mixin that share (owner, name, descriptor) belong to
+    one annotation (an ordinal-split or an all-sites wrap); the distinct
+    groups, in first-appearance order, pair with the mixin's handlers in
+    declaration order.
+    """
     failures = 0
-    seen = set()
-    for (mixin, cls, mname, mdesc, owner, wname, wdesc, _) in CHECKS:
-        if (mixin, wname) in seen:
-            continue
-        seen.add((mixin, wname))
-        invokes = method_invokes(cache[cls], mname, mdesc, cls)
-        opcode = next((c[0] for c in invokes if c[1:] == (owner, wname, wdesc)), None)
-        if opcode is None:
-            continue  # already reported by the call-site check
-        want = descriptor_arg_count(wdesc) + (0 if opcode == "invokestatic" else 1)
-        got = handler_signature(mixin)
-        if got is None:
+    groups = {}
+    for row in CHECKS:
+        (mixin, cls, mname, mdesc, owner, wname, wdesc, _) = row
+        key = (owner, wname, wdesc)
+        lst = groups.setdefault(mixin, [])
+        if key not in [k for k, *_ in lst]:
+            lst.append((key, row))
+
+    for mixin, entries in groups.items():
+        sigs = handler_signatures(mixin)
+        if sigs is None:
             print(f"FAIL  no @WrapOperation handler found in {mixin}")
             failures += 1
             continue
-        ret, count = got
-        want_ret = java_return(wdesc)
-        label = f"{mixin}.handler -> {owner.split('.')[-1]}.{wname}"
-        if count != want:
-            print(f"FAIL  handler takes {count} params, {opcode} needs {want} "
-                  f"(receiver {'included' if opcode != 'invokestatic' else 'absent'})  {label}")
+        if len(sigs) != len(entries):
+            print(f"FAIL  {mixin} declares {len(sigs)} @WrapOperation handler(s) "
+                  f"but CHECKS groups {len(entries)} call-site group(s)")
             failures += 1
-        elif ret != want_ret:
-            print(f"FAIL  handler returns {ret}, wrapped call returns {want_ret}  {label}")
-            failures += 1
-        else:
-            print(f"ok    {count} params + Operation -> {ret}   {label}")
+            continue
+        for (key, row), (ret, count) in zip(entries, sigs):
+            (mixin_, cls, mname, mdesc, owner, wname, wdesc, _) = row
+            invokes = method_invokes(cache[cls], mname, mdesc, cls)
+            opcode = next((c[0] for c in invokes if c[1:] == key), None)
+            if opcode is None:
+                continue  # already reported by the call-site check
+            want = descriptor_arg_count(wdesc) + (0 if opcode == "invokestatic" else 1)
+            want_ret = java_return(wdesc)
+            label = f"{mixin}.handler -> {owner.split('.')[-1]}.{wname}"
+            if count != want:
+                print(f"FAIL  handler takes {count} params, {opcode} needs {want} "
+                      f"(receiver {'included' if opcode != 'invokestatic' else 'absent'})  {label}")
+                failures += 1
+            elif ret != want_ret:
+                print(f"FAIL  handler returns {ret}, wrapped call returns {want_ret}  {label}")
+                failures += 1
+            else:
+                print(f"ok    {count} params + Operation -> {ret}   {label}")
     return failures
 
 
