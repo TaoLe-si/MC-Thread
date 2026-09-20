@@ -68,7 +68,18 @@ public abstract class LaserDrillDeferralMixin {
             original.call(bar, value);
             return;
         }
-        IfDeferral.runOrDeferVoid(harness(bar), () -> original.call(bar, value));
+        // Defer the caller's INTENT (advance by delta), not the absolute
+        // value it computed from a worker-side read. The coalesced batch
+        // lands on the server thread via server.execute(), which races the
+        // next tick's steal: when the drain runs after the next worker
+        // already read the same stale progress, two deferred
+        // setProgress(p + 1) calls both write the same absolute value and
+        // the bar advances one step per two ticks — the drill runs at an
+        // inconsistent, mostly halved rate. Re-reading at drain time and
+        // adding the delta makes every deferred advance count exactly
+        // once, regardless of drain timing.
+        int delta = value - bar.getProgress();
+        IfDeferral.runOrDeferVoid(harness(bar), () -> bar.setProgress(bar.getProgress() + delta));
     }
 
     @WrapOperation(
