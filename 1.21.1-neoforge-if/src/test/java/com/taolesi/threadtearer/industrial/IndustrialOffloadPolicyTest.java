@@ -23,17 +23,16 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * is {@code IndustrialProcessingTile → IndustrialMachineTile} on the IF side
  * and {@code MachineTile → PoweredTile → ActiveTile → BasicTile} on the
  * Titanium side; generators reach Titanium one level higher, through
- * {@code GeneratorTile}. Writing them from the sources matters: a chain
- * invented from memory passes the same assertions while describing a class
- * that does not exist — the mistake the Mekanism policy test was rewritten to
- * prevent.
+ * {@code GeneratorTile}; area machines share the same Titanium chain via
+ * {@code IndustrialWorkingTile → IndustrialAreaWorkingTile}. Writing them
+ * from the sources matters: a chain invented from memory passes the same
+ * assertions while describing a class that does not exist — the mistake the
+ * Mekanism policy test was rewritten to prevent.
  *
- * <p>Every family not on the list is refused, and the refusals were read too:
- * Water Condensator / Enchantment Factory / Applicator (a world read whose
- * value the tick consumes), Sludge Refiner (the level-wide shared
- * {@code RandomSource}), the area machines (entity scans, block placement),
- * and every generator (six-neighbour energy push whose received amount feeds
- * the extract).
+ * <p>Route B — area machines whose tick touches only Level-write APIs
+ * (auto-forwarded by the core) are admitted. The remaining area machines,
+ * which call entity / shared-RNG APIs the core does not intercept, keep
+ * running on the server thread.
  */
 class IndustrialOffloadPolicyTest {
 
@@ -70,23 +69,42 @@ class IndustrialOffloadPolicyTest {
                 "com.buuz135.industrial.block.resourceproduction.tile.PotionBrewerTile",
                 "com.buuz135.industrial.block.resourceproduction.tile.ResourcefulFurnaceTile",
                 "com.buuz135.industrial.block.resourceproduction.tile.SporesRecreatorTile",
-                "com.buuz135.industrial.block.resourceproduction.tile.WashingFactoryTile"),
+                "com.buuz135.industrial.block.resourceproduction.tile.WashingFactoryTile",
+                // Route B area machines — Level-write only.
+                "com.buuz135.industrial.block.resourceproduction.tile.BlockBreakerTile",
+                "com.buuz135.industrial.block.resourceproduction.tile.FluidCollectorTile",
+                "com.buuz135.industrial.block.resourceproduction.tile.FluidPlacerTile",
+                "com.buuz135.industrial.block.agriculturehusbandry.tile.PlantSowerTile",
+                "com.buuz135.industrial.block.agriculturehusbandry.tile.HydroponicBedTile",
+                "com.buuz135.industrial.block.agriculturehusbandry.tile.SimulatedHydroponicBedTile"),
                 IndustrialOffloadPolicy.allowedClasses());
-        assertEquals(14, IndustrialOffloadPolicy.allowedSize());
+        assertEquals(20, IndustrialOffloadPolicy.allowedSize());
     }
 
-    /** The admitted machines, each through its real chain. */
+    /**
+     * The admitted machines, each through its real chain. Processing machines
+     * share one chain shape; the Bio Reactor walks through the working base;
+     * the route-B area machines share the area base chain.
+     */
     @Test
     void admittedMachinesAreOffloadedThroughTheirRealChains() {
-        // Processing machines share one chain shape.
         for (String leaf : IndustrialOffloadPolicy.allowedClasses()) {
-            if (!leaf.endsWith("BioReactorTile")) {
-                assertAllowed(leaf, PROCESSING, IF_MACHINE, MACHINE, POWERED, ACTIVE, BASIC);
-            }
+            String[] chain = chainFor(leaf);
+            assertAllowed(chain);
         }
-        // The one admitted working machine.
-        assertAllowed("com.buuz135.industrial.block.generator.tile.BioReactorTile",
-                WORKING, IF_MACHINE, MACHINE, POWERED, ACTIVE, BASIC);
+    }
+
+    private static String[] chainFor(String leaf) {
+        String suffix = leaf.substring(leaf.lastIndexOf('.') + 1);
+        if (suffix.equals("BioReactorTile")
+                || suffix.equals("HydroponicBedTile")
+                || suffix.equals("SimulatedHydroponicBedTile")) {
+            return new String[]{leaf, WORKING, IF_MACHINE, MACHINE, POWERED, ACTIVE, BASIC};
+        }
+        if (suffix.equals("PlantSowerTile")) {
+            return new String[]{leaf, AREA, WORKING, IF_MACHINE, MACHINE, POWERED, ACTIVE, BASIC};
+        }
+        return new String[]{leaf, PROCESSING, IF_MACHINE, MACHINE, POWERED, ACTIVE, BASIC};
     }
 
     /**
@@ -94,6 +112,8 @@ class IndustrialOffloadPolicyTest {
      * sizes its fill from six neighbours' fluid state; Enchantment Factory
      * and Applicator drain the handler above them and feed the amount into
      * the enchant level; Sludge Refiner draws from {@code level.random}.
+     * The remaining area machines touch entity / shared-RNG APIs that the
+     * core does not intercept and have not been audited safe on a worker.
      */
     @Test
     void worldReadingAndSharedStateMachinesAreRefused() {
@@ -105,10 +125,33 @@ class IndustrialOffloadPolicyTest {
                 PROCESSING, IF_MACHINE, MACHINE, POWERED, ACTIVE, BASIC);
         assertRefused("com.buuz135.industrial.block.resourceproduction.tile.SludgeRefinerTile",
                 PROCESSING, IF_MACHINE, MACHINE, POWERED, ACTIVE, BASIC);
-        // Area machines: entity scans and block placement.
+        // Area machines that DO call entity / shared-RNG APIs — pinned here
+        // so a careless edit can't admit them back into the route-B allowlist.
         assertRefused("com.buuz135.industrial.block.agriculturehusbandry.tile.SewerTile",
                 AREA, WORKING, IF_MACHINE, MACHINE, POWERED, ACTIVE, BASIC);
-        assertRefused("com.buuz135.industrial.block.resourceproduction.tile.BlockBreakerTile",
+        assertRefused("com.buuz135.industrial.block.agriculturehusbandry.tile.PlantGathererTile",
+                AREA, WORKING, IF_MACHINE, MACHINE, POWERED, ACTIVE, BASIC);
+        assertRefused("com.buuz135.industrial.block.agriculturehusbandry.tile.MobCrusherTile",
+                AREA, WORKING, IF_MACHINE, MACHINE, POWERED, ACTIVE, BASIC);
+        assertRefused("com.buuz135.industrial.block.agriculturehusbandry.tile.MobDuplicatorTile",
+                AREA, WORKING, IF_MACHINE, MACHINE, POWERED, ACTIVE, BASIC);
+        assertRefused("com.buuz135.industrial.block.agriculturehusbandry.tile.SlaughterFactoryTile",
+                AREA, WORKING, IF_MACHINE, MACHINE, POWERED, ACTIVE, BASIC);
+        assertRefused("com.buuz135.industrial.block.agriculturehusbandry.tile.AnimalFeederTile",
+                AREA, WORKING, IF_MACHINE, MACHINE, POWERED, ACTIVE, BASIC);
+        assertRefused("com.buuz135.industrial.block.agriculturehusbandry.tile.AnimalRancherTile",
+                AREA, WORKING, IF_MACHINE, MACHINE, POWERED, ACTIVE, BASIC);
+        assertRefused("com.buuz135.industrial.block.agriculturehusbandry.tile.AnimalBabySeparatorTile",
+                AREA, WORKING, IF_MACHINE, MACHINE, POWERED, ACTIVE, BASIC);
+        assertRefused("com.buuz135.industrial.block.resourceproduction.tile.MechanicalDirtTile",
+                AREA, WORKING, IF_MACHINE, MACHINE, POWERED, ACTIVE, BASIC);
+        assertRefused("com.buuz135.industrial.block.resourceproduction.tile.MarineFisherTile",
+                AREA, WORKING, IF_MACHINE, MACHINE, POWERED, ACTIVE, BASIC);
+        assertRefused("com.buuz135.industrial.block.resourceproduction.tile.LaserDrillTile",
+                AREA, WORKING, IF_MACHINE, MACHINE, POWERED, ACTIVE, BASIC);
+        assertRefused("com.buuz135.industrial.block.resourceproduction.tile.MobDetectorTile",
+                AREA, WORKING, IF_MACHINE, MACHINE, POWERED, ACTIVE, BASIC);
+        assertRefused("com.buuz135.industrial.block.agriculturehusbandry.tile.PlantFertilizerTile",
                 AREA, WORKING, IF_MACHINE, MACHINE, POWERED, ACTIVE, BASIC);
         // Generators: six-neighbour energy push, extract feeds receive.
         assertRefused("com.buuz135.industrial.block.generator.tile.BiofuelGeneratorTile",
